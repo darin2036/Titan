@@ -7,7 +7,7 @@
 
 Titan brings the core of a knowledge base and a work tracker into one local workspace. Agents author records, connect ideas to work and evidence, and propose changes. People think with the agent, review consequential decisions, and inspect the history behind the system's understanding.
 
-The underlying records are Markdown in Git. The human interface is a readable workspace over that shared memory, while external agents use the same records through MCP or a versioned API.
+Native records are Markdown in Git. Connected Confluence pages stay in a private local cache until you choose to move them into Titan. The human interface is a readable workspace over that shared memory, while external agents use the same records through MCP or a versioned API.
 
 **Status:** early proof of concept, built for a single owner running locally. You can explore the complete demo without API keys or paid model calls. This is not yet a hosted service or a production multi-user application.
 
@@ -57,7 +57,7 @@ The example records describe a move from long-lived production API keys to workl
 1. Browse **Knowledge**, **Work**, **Decisions**, and **Evidence** to see the connected records.
 2. Open **Review inbox** and accept the proposed supersession of the original authentication decision.
 3. Search for authentication. Inspect the replacement and the historical record's warning: the old decision remains available but is marked unsuitable as a current basis.
-4. Select **New record**, describe an idea, and review the agent's draft before applying it.
+4. Select **New page** to write directly, or **Draft with agent** to describe an idea and review the agent’s draft before applying it. The page composer autosaves private drafts and offers announcement, company calendar, and guide starting points. Publish to add the page to shared knowledge; use **Edit page** to revise it later.
 5. Open the floating **✳** bubble. Drag its header or icon to move it beside your document. Highlight a passage to attach it to the conversation; the chat shows a small context preview you can clear. Click the bubble again or press **Escape** to minimize it without losing your message. With the icon focused, arrow keys move it.
 6. Open **Learning** to capture a local dataset manifest, evaluate a baseline candidate, activate it, and roll back.
 7. Ask the agent to remove a record, review the preview, and apply it. The record is excluded from agent context; the human owner can restore it from **Trash**.
@@ -96,17 +96,18 @@ Keep the knowledge repository separate from this application checkout. Records a
 
 A conversation becomes a proposed record change. The domain engine validates the change, checks the source revision, records provenance, and applies the authorized operation. Intelligence jobs return structured relationship proposals; policy determines which can be accepted automatically and which need review.
 
-| Capability              | Available today                                                                                       |
-| ----------------------- | ----------------------------------------------------------------------------------------------------- |
-| Shared records          | Knowledge, work, decisions, and evidence in versioned Markdown with stable IDs                        |
-| Conversational editing  | Draft previews, selected-passage context, and a movable agent panel                                   |
-| Connected knowledge     | Typed relationships, evidence references, contradiction and supersession handling                     |
-| Retrieval               | Full-text search and graph context with revisions, scope, validity, and warnings; optional embeddings |
-| Oversight               | Review inbox, revision history, decision log, and bounded stored justifications                       |
-| Agent access            | Scoped integration tokens, HTTP API, and a local MCP server                                           |
-| External execution      | Signed `work.ready` webhooks and authenticated outcome submission                                     |
-| Learning infrastructure | Local feedback, dataset lineage, deterministic candidate evaluation, activation, and rollback         |
-| Retention               | Audited soft removal, agent exclusion, and human-only restoration                                     |
+| Capability              | Available today                                                                                                   |
+| ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Shared records          | Knowledge, work, decisions, and evidence in versioned Markdown with stable IDs                                    |
+| Direct composition      | Rich-text editing, Markdown and keyboard shortcuts, editable tables, private drafts, and revision conflict review |
+| Conversational editing  | Draft previews, selected-passage context, and a movable agent panel                                               |
+| Connected knowledge     | Typed relationships, evidence references, contradiction and supersession handling                                 |
+| Retrieval               | Full-text search and graph context with revisions, scope, validity, and warnings; optional embeddings             |
+| Oversight               | Review inbox, revision history, decision log, and bounded stored justifications                                   |
+| Agent access            | Scoped integration tokens, HTTP API, and a local MCP server                                                       |
+| External execution      | Signed `work.ready` webhooks and authenticated outcome submission                                                 |
+| Learning infrastructure | Local feedback, dataset lineage, deterministic candidate evaluation, activation, and rollback                     |
+| Retention               | Audited soft removal, agent exclusion, and human-only restoration                                                 |
 
 The default **bounded** autonomy mode lets agents maintain routine relationships and evidenced progress, while consequential decisions require review. **Full** mode permits more automatic actions under the same validation and evidence rules. Neither lets agents restore removed records, change authorization, activate models, or purge data.
 
@@ -114,7 +115,9 @@ Implementation being finished is separate from accepted completion. An agent say
 
 ## Bring your own model
 
-Titan supports OpenAI and Anthropic through the same controlled intelligence pipeline. Export the key for the provider you want to use before starting the launcher:
+Titan supports OpenAI, Claude (Anthropic), and custom OpenAI-compatible providers through the same controlled intelligence pipeline. The form shows the selected provider’s model and credential fields. Custom connections also ask for an API base URL (including `/v1` when required) and use Chat Completions; authentication is optional for local servers. Remote endpoints require HTTPS, and provider redirects are rejected to keep credentials on the chosen endpoint. In **Settings → Intelligence & autonomy**, choose your provider, enter a model ID and API key, then use **Test connection** and **Save operating policy**. Testing makes a small billable model request. Saved keys are kept in private server state with owner-only file permissions; `TITAN_STATE_DIR` must be outside the knowledge repository. You can replace or remove a saved key here.
+
+Alternatively, export the key before starting the launcher:
 
 ```sh
 # Choose the provider you need; do not commit real keys.
@@ -123,7 +126,7 @@ export OPENAI_API_KEY='<your-key>'
 npm run dev
 ```
 
-In **Settings**, select your provider and explicitly enter an available model ID. Provider usage is billed to your account. Credentials stay in server processes and are not recorded in the knowledge repository, browser storage, model context, or audit logs. Titan does not automatically load a repository `.env` file.
+In **Settings**, select your provider and explicitly enter an available model ID. Provider usage is billed to your account. Credentials stay in private server state and server processes and are not recorded in the knowledge repository, browser storage, model context, or audit logs. Titan does not automatically load a repository `.env` file.
 
 Live inference sends the assembled record context to the selected provider. The fixture demo makes no model calls. Optional OpenAI embeddings need separate embedding-model configuration and OpenAI credentials; search remains functional without them.
 
@@ -175,3 +178,26 @@ Titan is **source-available** under [PolyForm Shield 1.0.0](LICENSE), with an [a
 - The maintainer may offer separately licensed commercial and hosted versions.
 
 These restrictions mean Titan is not MIT-licensed or OSI-approved open-source software. Dependencies retain their own licenses. The linked license and additional permission contain the controlling terms.
+
+## Connect Confluence
+
+Integrations appear in the Settings catalog. Each integration opens a dedicated screen defined by its manifest. See the [plugin contract](docs/technical-reference.md#integration-plugins-and-configuration) to add a provider.
+
+In **Settings → Integrations → Confluence**, authorize your Atlassian account, choose a site and spaces, and select **Save connection**. The connection defaults to read only. Pages appear in Titan with source provenance and the same revision-bound reliability assessment as native knowledge. **Sync now** refreshes selected spaces in the background.
+
+The deployment operator configures the shared Titan OAuth app once using these exported environment variables:
+
+```sh
+export TITAN_CONFLUENCE_CLIENT_ID='<Titan OAuth app ID>'
+export TITAN_CONFLUENCE_CLIENT_SECRET='<Titan OAuth app secret>'
+export TITAN_CONFLUENCE_REDIRECT_URI='http://127.0.0.1:4310/api/v1/integrations/confluence/callback'
+npm run dev
+```
+
+Register that exact callback in Atlassian’s developer console. Enable `offline_access`, `read:page:confluence`, and `read:space:confluence`; add `write:page:confluence` for optional editing. Users connect through Atlassian consent without pasting API tokens or creating their own OAuth apps. Organization policy can require administrator approval.
+
+Keep `TITAN_STATE_DIR` outside the knowledge repository. Connected snapshots, raw source content, credentials, and dependent knowledge metadata stay in private deployment state and are excluded from Git publishing. Protect and back up that state separately. The current integration uses the single owner’s access; it is not yet a multi-user permission model.
+
+Enable **Allow edits to Confluence** to publish a private draft with **Save to Confluence**. Titan checks source versions and preserves conflicting drafts. Pages with unsupported macros, attachments, or formatting remain linked to their original and cannot be overwritten with a partial conversion.
+
+Choose **Move to Titan** in a page’s Confluence source details to review a migration. The page keeps its Titan ID, connections, and local history; its original Confluence page stays in place. Migrated content joins the Markdown repository and can be published through Git. See the [technical reference](docs/technical-reference.md#confluence-cloud-connection) for storage, sync, and OAuth deployment details.

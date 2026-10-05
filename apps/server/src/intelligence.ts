@@ -1,6 +1,14 @@
 import { createHmac } from "node:crypto";
-import { mkdirSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  mkdirSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  chmodSync,
+  renameSync,
+  realpathSync,
+} from "node:fs";
+import { join, relative, isAbsolute } from "node:path";
 import { Domain, INFERENCE, OWNER } from "./domain.ts";
 import {
   InferenceResultSchema,
@@ -19,6 +27,51 @@ export class Intelligence {
     public stateDir: string,
     public url = process.env.TITAN_INTELLIGENCE_URL ?? "http://127.0.0.1:4311",
   ) {}
+  credentials() {
+    const path = join(this.stateDir, "provider-credentials.json");
+    return existsSync(path)
+      ? (JSON.parse(readFileSync(path, "utf8")) as Record<string, string>)
+      : {};
+  }
+  credentialStatus() {
+    const saved = this.credentials();
+    return {
+      openai: !!(saved.OPENAI_API_KEY || process.env.OPENAI_API_KEY),
+      anthropic: !!(saved.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY),
+      custom: !!(saved.CUSTOM_API_KEY || process.env.CUSTOM_API_KEY),
+    };
+  }
+  saveCredential(provider: "openai" | "anthropic" | "custom", key: string) {
+    mkdirSync(this.stateDir, { recursive: true, mode: 0o700 });
+    const location = relative(
+      realpathSync(this.domain.storage.root),
+      realpathSync(this.stateDir),
+    );
+    demand(
+      location.startsWith("../") || isAbsolute(location),
+      422,
+      "Store Titan's private state outside the workspace before saving an API key.",
+    );
+    const saved = this.credentials();
+    const ref =
+      provider === "openai"
+        ? "OPENAI_API_KEY"
+        : provider === "anthropic"
+          ? "ANTHROPIC_API_KEY"
+          : "CUSTOM_API_KEY";
+    if (key) saved[ref] = key;
+    else delete saved[ref];
+    const path = join(this.stateDir, "provider-credentials.json");
+    const temporary = path + ".tmp";
+    writeFileSync(temporary, JSON.stringify(saved), { mode: 0o600 });
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+    return this.credentialStatus();
+  }
+  async testConnection(config: unknown) {
+    await this.call("/v1/test", { config });
+    return { ok: true };
+  }
   async call(path: string, payload: unknown) {
     const res = await fetch(this.url + path, {
       method: "POST",
@@ -26,7 +79,10 @@ export class Intelligence {
         "Content-Type": "application/json",
         Authorization: `Bearer ${process.env.TITAN_INTELLIGENCE_TOKEN ?? ""}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        ...(payload as object),
+        credentials: this.credentials(),
+      }),
       signal: AbortSignal.timeout(100_000),
     });
     const data = (await res.json()) as any;
@@ -42,6 +98,7 @@ export class Intelligence {
     kind: string;
     record?: RecordView;
     selection?: string;
+    sources?: RecordView[];
   }) {
     return this.call("/v1/author", {
       ...input,

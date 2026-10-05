@@ -2,6 +2,23 @@ import { z } from "zod";
 import { createHash, randomUUID } from "node:crypto";
 export const id = z.string().uuid();
 export const short = z.string().max(600);
+export const ConfluenceSourceSchema = z
+  .object({
+    siteId: z.string().min(1).max(200),
+    pageId: z.string().regex(/^\d+$/),
+    spaceId: z.string().regex(/^\d+$/),
+    parentId: z.string().nullable(),
+    url: z
+      .string()
+      .url()
+      .max(2000)
+      .refine((value) => new URL(value).protocol === "https:"),
+    version: z.number().int().positive(),
+    authorId: z.string().nullable(),
+    owner: z.enum(["confluence", "titan"]),
+    issues: z.array(z.string().max(200)).max(50),
+  })
+  .strict();
 export const UnitSchema = z
   .object({
     schemaVersion: z.literal(1),
@@ -31,11 +48,35 @@ export const UnitSchema = z
     updatedAt: z.string().datetime(),
     extensions: z
       .record(z.string().regex(/^[a-z][\w-]*:[\w.-]+$/), z.unknown())
+      .refine(
+        (extensions) =>
+          extensions["titan:confluence"] === undefined ||
+          ConfluenceSourceSchema.safeParse(extensions["titan:confluence"])
+            .success,
+        "Invalid Confluence source metadata",
+      )
       .default({}),
   })
   .strict();
 export type Unit = z.infer<typeof UnitSchema>;
 export type RecordView = Unit & { revision: string };
+export const ComposerContentSchema = z
+  .object({
+    kind: UnitSchema.shape.kind,
+    title: z.string().max(200),
+    body: UnitSchema.shape.body,
+    applicability: UnitSchema.shape.applicability,
+    source: z
+      .object({ id, revision: z.string().min(1) })
+      .strict()
+      .nullable(),
+  })
+  .strict();
+export type ComposerDraft = z.infer<typeof ComposerContentSchema> & {
+  id: string;
+  version: number;
+  updatedAt: string;
+};
 export const RelationTypes = [
   { key: "contains", outward: "contains", inward: "is part of" },
   { key: "blocks", outward: "blocks", inward: "is blocked by" },
@@ -74,20 +115,48 @@ export type Event = {
   operation: string;
   entities: string[];
   revisions: Record<string, string>;
+  resultingRevisions?: Record<string, string>;
   justification: string;
   outcome: string;
   at: string;
   model?: string;
   policyVersion?: string;
 };
+export const ProviderBaseUrlSchema = z
+  .string()
+  .trim()
+  .max(2000)
+  .default("")
+  .refine((value) => {
+    if (!value) return true;
+    try {
+      const url = new URL(value);
+      return (
+        !url.username &&
+        !url.password &&
+        !url.search &&
+        !url.hash &&
+        (url.protocol === "https:" ||
+          (url.protocol === "http:" &&
+            ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)))
+      );
+    } catch {
+      return false;
+    }
+  }, "Use an HTTPS API base URL, or HTTP on localhost, without credentials or query parameters");
 export const SettingsSchema = z
   .object({
     schemaVersion: z.literal(1),
     deploymentId: id,
     autonomy: z.enum(["bounded", "full"]),
-    provider: z.enum(["fixture", "openai", "anthropic"]),
+    provider: z.enum(["fixture", "openai", "anthropic", "custom"]),
     model: z.string().max(120),
-    credentialRef: z.enum(["OPENAI_API_KEY", "ANTHROPIC_API_KEY"]),
+    credentialRef: z.enum([
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "CUSTOM_API_KEY",
+    ]),
+    providerBaseUrl: ProviderBaseUrlSchema,
     embeddingModel: z.string().max(120).default(""),
     activeModel: z.string(),
     previousModel: z.string().nullable(),

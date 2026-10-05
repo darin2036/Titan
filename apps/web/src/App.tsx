@@ -1,6 +1,31 @@
+import SettingsShell, {
+  settingsRoute,
+  type SettingsSection,
+} from "./SettingsShell";
+import { ConfluenceSource } from "./ConfluenceSource";
+import {
+  IntegrationCatalog,
+  IntegrationConfiguration,
+} from "./integrations/IntegrationSettings";
 import React, { useState, useEffect, useCallback, useRef } from "react";
-import Markdown from "react-markdown";
+import PageActionMenu from "./PageActionMenu";
+import RecordMetadata from "./RecordMetadata";
+import { recordTypeLabels } from "./record-presentation";
+import Markdown from "./record-markdown";
 import FloatingAgent from "./FloatingAgent";
+import {
+  PlacesNavigation,
+  RecordOverview,
+  PlaceDialog,
+  placeContent,
+  recordKinds,
+} from "./Places";
+import type { PlaceView } from "../../shared/places";
+import { placeGroupings } from "../../shared/places";
+import PageComposer, {
+  type PageDraft,
+  type ComposerHandle,
+} from "./PageComposer";
 type Unit = {
   id: string;
   kind: string;
@@ -14,6 +39,7 @@ type Unit = {
   applicability: string[];
   updatedAt: string;
   warnings?: string[];
+  extensions?: Record<string, unknown>;
 };
 type Relationship = {
   id: string;
@@ -23,8 +49,11 @@ type Relationship = {
   state: string;
   justification: string;
   evidence: string[];
+  revisions: Record<string, string>;
 };
 type Draft = {
+  sources?: Record<string, string>;
+  placeId?: string;
   draft: {
     title: string;
     body: string;
@@ -55,6 +84,8 @@ async function api(
   return value;
 }
 const labels: Record<string, string> = {
+  all: "All records",
+  place: "Overview",
   knowledge: "Knowledge",
   decision: "Decisions",
   work: "Work",
@@ -81,7 +112,10 @@ export default function App() {
     [token, setToken] = useState(""),
     [error, setError] = useState(""),
     [busy, setBusy] = useState(false);
-  const [view, setView] = useState("knowledge"),
+  const [settingsSection, setSettingsSection] =
+    useState<SettingsSection>("integrations");
+  const [integrationId, setIntegrationId] = useState<string | null>(null);
+  const [view, setView] = useState("all"),
     [units, setUnits] = useState<Unit[]>([]),
     [selected, setSelected] = useState<string | null>(null),
     [workspace, setWorkspace] = useState<any>(null),
@@ -100,7 +134,42 @@ export default function App() {
     [localPath, setLocalPath] = useState(""),
     [github, setGithub] = useState(""),
     [integrationToken, setIntegrationToken] = useState("");
+  const [places, setPlaces] = useState<PlaceView[]>([]);
+  const [placeId, setPlaceId] = useState<string | null>(null);
+  const [searchScope, setSearchScope] = useState<string>("everywhere");
+  const searchRequest = useRef(0);
+  useEffect(() => {
+    setSearchScope(placeId ?? "everywhere");
+    searchRequest.current += 1;
+    setSearch(null);
+  }, [placeId]);
+  const [navigationRoot, setNavigationRoot] = useState("");
+  const [draftPlaces, setDraftPlaces] = useState<Record<string, string | null>>(
+    {},
+  );
+  const [placeDialog, setPlaceDialog] = useState<PlaceView | "new" | null>(
+    null,
+  );
+  const [mobileNavOpen, setMobileNavOpen] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(() => {
+    try {
+      return Math.max(
+        260,
+        Math.min(
+          360,
+          Number(localStorage.getItem("titan:sidebar-width")) || 300,
+        ),
+      );
+    } catch {
+      return 300;
+    }
+  });
   const [agentOpen, setAgentOpen] = useState(false);
+  const [pageNotice, setPageNotice] = useState("");
+  const [pageDrafts, setPageDrafts] = useState<PageDraft[]>([]);
+  const [pageEditor, setPageEditor] = useState<PageDraft | null>(null);
+  const [actionsHost, setActionsHost] = useState<HTMLDivElement | null>(null);
+  const pageEditorRef = useRef<ComposerHandle>(null);
   const articleRef = useRef<HTMLElement>(null);
   const composerRef = useRef<HTMLTextAreaElement>(null);
   function openComposer() {
@@ -109,18 +178,22 @@ export default function App() {
   }
   const current = units.find((u) => u.id === selected) ?? null;
   const refresh = useCallback(async () => {
-    const [u, w, r, v, e] = await Promise.all([
+    const [u, w, r, v, e, d, places] = await Promise.all([
       api("/units?removed=true"),
       api("/workspace"),
       api("/relationships"),
       api("/reviews"),
       api("/audit"),
+      api("/composer-drafts"),
+      api("/places"),
     ]);
     setUnits(u);
     setWorkspace(w);
     setRelations(r);
     setReviews(v);
     setEvents(e);
+    setPageDrafts(d);
+    setPlaces(places);
   }, []);
   async function run(fn: () => Promise<void>) {
     setBusy(true);
@@ -159,6 +232,93 @@ export default function App() {
     return () => clearInterval(timer);
   }, [connected, refresh]);
   useEffect(() => {
+    if (!workspace?.root) return;
+    let restored: {
+      placeId?: string;
+      view?: string;
+      selected?: string;
+      draftPlaces?: Record<string, string | null>;
+    } = {};
+    try {
+      restored = JSON.parse(
+        localStorage.getItem("titan:navigation:" + workspace.root) ?? "{}",
+      );
+    } catch {}
+    const destination = places.find((place) => place.id === restored?.placeId);
+    const record = units.find(
+      (unit) => unit.id === restored?.selected && unit.lifecycle === "active",
+    );
+    const views = [
+      "all",
+      "place",
+      ...recordKinds,
+      "reviews",
+      "audit",
+      "learning",
+      "removed",
+      "settings",
+    ];
+    setPlaceId(destination?.id ?? null);
+    const returnedFromConfluence = new URLSearchParams(location.search).has(
+      "confluence",
+    );
+    if (returnedFromConfluence) {
+      if (new URLSearchParams(location.search).get("confluence") === "error")
+        setError(
+          "Confluence access wasn’t completed. Connect again in Settings.",
+        );
+      window.history.replaceState(null, "", location.pathname);
+    }
+    const route = settingsRoute(location.hash);
+    const integrationRoute = route?.integrationId;
+    const onSettingsRoute = !!route;
+    setSettingsSection(
+      returnedFromConfluence
+        ? "integrations"
+        : (route?.section ?? "integrations"),
+    );
+    setIntegrationId(
+      returnedFromConfluence ? "confluence" : (integrationRoute ?? null),
+    );
+    if (returnedFromConfluence)
+      window.history.replaceState(
+        null,
+        "",
+        location.pathname + "#settings/integrations/confluence",
+      );
+    setSelected(
+      returnedFromConfluence || onSettingsRoute ? null : (record?.id ?? null),
+    );
+    setView(
+      (returnedFromConfluence || onSettingsRoute ? "settings" : record?.kind) ??
+        (restored?.view &&
+        views.includes(restored.view) &&
+        (restored.view !== "place" || destination)
+          ? restored.view
+          : "all"),
+    );
+    setNavigationRoot(workspace.root);
+    setDraftPlaces(restored?.draftPlaces ?? {});
+  }, [workspace?.root]);
+  useEffect(() => {
+    if (!workspace?.root || navigationRoot !== workspace.root || !connected)
+      return;
+    try {
+      localStorage.setItem(
+        "titan:navigation:" + workspace.root,
+        JSON.stringify({ placeId, view, selected, draftPlaces }),
+      );
+    } catch {}
+  }, [
+    placeId,
+    view,
+    selected,
+    draftPlaces,
+    navigationRoot,
+    workspace?.root,
+    connected,
+  ]);
+  useEffect(() => {
     setHistory([]);
     setSelection("");
     setDraft(null);
@@ -186,15 +346,118 @@ export default function App() {
       document.removeEventListener("selectionchange", captureSelection);
   }, []);
   const reviewCount = reviews.relationships.length + reviews.mutations.length;
-  const list = (
-    search ?? units.filter((u) => u.lifecycle === "active" && u.kind === view)
-  ).filter((u) => u.lifecycle === "active");
+  const activePlace = places.find((place) => place.id === placeId);
+  const isRecordView =
+    recordKinds.includes(view) || view === "all" || view === "place";
+  const resultPlace = search
+    ? places.find((place) => place.id === searchScope)
+    : activePlace;
+  const list = (search ?? units)
+    .filter((u) => u.lifecycle === "active")
+    .filter((u) => !resultPlace || resultPlace.memberIds.includes(u.id))
+    .filter((u) => !resultPlace || placeGroupings(resultPlace).includes(u.kind))
+    .filter(
+      (u) => search !== null || !recordKinds.includes(view) || u.kind === view,
+    );
+  const heading =
+    activePlace && view === "place" ? activePlace.name : labels[view];
+  async function savePlace(
+    content: ReturnType<typeof placeContent>,
+    place?: PlaceView,
+  ) {
+    const saved = await api(
+      place ? "/places/" + place.id : "/places",
+      place ? "PUT" : "POST",
+      place ? { revision: place.revision, content } : content,
+    );
+    setPlaces((previous) =>
+      place
+        ? previous.map((p) => (p.id === saved.id ? saved : p))
+        : [...previous, saved],
+    );
+    if (!place) navigateTo("place", saved.id);
+    await refresh();
+  }
+  function updatePlace(
+    place: PlaceView,
+    content: ReturnType<typeof placeContent>,
+  ) {
+    void run(() => savePlace(content, place));
+  }
+  function navigateTo(next: string, nextPlace: string | null = null) {
+    void leaveEditor(() => {
+      setPlaceId(nextPlace);
+      navigateNow(next);
+      setMobileNavOpen(false);
+      if (matchMedia("(max-width: 760px)").matches) setAgentOpen(false);
+    });
+  }
+  function openRecord(id: string, nextPlace: string | null = placeId) {
+    const unit = units.find((u) => u.id === id && u.lifecycle === "active");
+    if (!unit) return;
+    void leaveEditor(() => {
+      setSelected(id);
+      setView(unit.kind);
+      setPlaceId(nextPlace);
+      setDraft(null);
+      setNewUnit(false);
+      setSearch(null);
+      setQuery("");
+      setPageNotice("");
+      setMobileNavOpen(false);
+      if (matchMedia("(max-width: 760px)").matches) setAgentOpen(false);
+    });
+  }
+  async function addPublishedToPlace(id: string, destination = placeId) {
+    if (!destination) return;
+    const latest: PlaceView[] = await api("/places");
+    const place = latest.find((p) => p.id === destination);
+    if (place && !place.memberIds.includes(id))
+      await savePlace(
+        { ...placeContent(place), memberIds: [...place.memberIds, id] },
+        place,
+      );
+  }
+  function draftOverview() {
+    if (!activePlace) return;
+    void leaveEditor(() => {
+      setSelected(null);
+      setNewUnit(true);
+      setKind("knowledge");
+      setDraft(null);
+      openComposer();
+      void run(async () => {
+        const response = await api("/author", "POST", {
+          instruction:
+            activePlace.name +
+            " overview\nSummarize the intent, key decisions, work, and gaps using only the supplied source records.",
+          kind: "knowledge",
+          placeId: activePlace.id,
+        });
+        setDraft(response);
+        setMessage("Titan prepared a source-based overview for you to review.");
+      });
+    });
+  }
+  function resizeSidebar(event: React.PointerEvent<HTMLDivElement>) {
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+  function setWidth(value: number) {
+    const width = Math.max(260, Math.min(360, value));
+    setSidebarWidth(width);
+    try {
+      localStorage.setItem("titan:sidebar-width", String(width));
+    } catch {}
+  }
   async function author() {
     if (!instruction.trim()) return;
     await run(async () => {
       const response = await api("/author", "POST", {
         instruction,
         kind,
+        ...(activePlace && (newUnit || !current)
+          ? { placeId: activePlace.id }
+          : {}),
         ...(!newUnit && current
           ? { id: current.id, revision: current.revision, selection }
           : {}),
@@ -228,8 +491,17 @@ export default function App() {
           kind: draft.draft.kind,
           title: draft.draft.title,
           body: draft.draft.body,
+          ...(draft.sources
+            ? { extensions: { "titan:sources": draft.sources } }
+            : {}),
         });
         if (result.id) {
+          await addPublishedToPlace(result.id, draft.placeId ?? placeId).catch(
+            () =>
+              setPageNotice(
+                "Published. Add this record to the place through Organize place.",
+              ),
+          );
           setSelected(result.id);
           setView(result.kind);
         }
@@ -244,27 +516,107 @@ export default function App() {
       await refresh();
     });
   }
+  async function leaveEditor(next: (saved?: PageDraft) => void) {
+    if (pageEditorRef.current?.isWorking()) return;
+    try {
+      const saved = await pageEditorRef.current?.save();
+      setPageEditor(null);
+      next(saved);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? e.message
+          : "Save your draft before leaving this page.",
+      );
+    }
+  }
+  function startPage(source: Unit | null = null) {
+    void leaveEditor(() => {
+      setPageNotice("");
+      const existing =
+        source && pageDrafts.find((d) => d.source?.id === source.id);
+      const nextPage = existing || {
+        id: crypto.randomUUID(),
+        version: 0,
+        kind: source?.kind ?? (recordKinds.includes(view) ? view : "knowledge"),
+        title: source?.title ?? "",
+        body: source?.body ?? "",
+        applicability: source?.applicability ?? [],
+        source: source ? { id: source.id, revision: source.revision } : null,
+        updatedAt: new Date().toISOString(),
+      };
+      setPageEditor(nextPage);
+      setDraftPlaces((previous) =>
+        Object.hasOwn(previous, nextPage.id)
+          ? previous
+          : { ...previous, [nextPage.id]: placeId },
+      );
+      setSelected(source?.id ?? null);
+      setDraft(null);
+      setSelection("");
+      setNewUnit(false);
+      setAgentOpen(false);
+    });
+  }
   function navigate(next: string) {
+    navigateTo(next, null);
+  }
+  function openIntegration(id: string | null) {
+    setSettingsSection("integrations");
+    setIntegrationId(id);
+    window.history.pushState(
+      null,
+      "",
+      location.pathname +
+        (id ? "#settings/integrations/" + id : "#settings/integrations"),
+    );
+  }
+  function openSettingsSection(section: SettingsSection) {
+    setIntegrationId(null);
+    setSettingsSection(section);
+    window.history.pushState(
+      null,
+      "",
+      location.pathname + "#settings/" + section,
+    );
+  }
+  useEffect(() => {
+    const handleRoute = () => {
+      const route = settingsRoute(location.hash);
+      if (route) {
+        setSettingsSection(route.section);
+        setIntegrationId(route.integrationId);
+        setView("settings");
+        setSelected(null);
+      } else setIntegrationId(null);
+    };
+    window.addEventListener("popstate", handleRoute);
+    window.addEventListener("hashchange", handleRoute);
+    return () => {
+      window.removeEventListener("popstate", handleRoute);
+      window.removeEventListener("hashchange", handleRoute);
+    };
+  }, []);
+  function navigateNow(next: string) {
+    setIntegrationId(null);
+    if (next === "settings") setSettingsSection("integrations");
+    if (location.hash.startsWith("#settings"))
+      window.history.replaceState(null, "", location.pathname);
+    setPageNotice("");
     setView(next);
     setSearch(null);
     setQuery("");
     setDraft(null);
     setSelected(null);
     setNewUnit(false);
-    if (["knowledge", "work", "decision", "evidence"].includes(next))
-      setKind(next);
+    setKind(recordKinds.includes(next) ? next : "knowledge");
   }
   if (!connected)
     return (
       <div className="login">
         <div className="login-card">
           <div className="brand-mark">T</div>
-          <div className="eyebrow">Your Titan workspace</div>
           <h1>Welcome to Titan</h1>
-          <p>
-            A home for your ideas, decisions, and next steps. Connect your
-            workspace to get started.
-          </p>
           <form
             onSubmit={(e) => {
               e.preventDefault();
@@ -295,59 +647,98 @@ export default function App() {
               {error}
             </div>
           )}
-          <small>
-            Your records stay in your repository. Model connections are
-            optional.
-          </small>
         </div>
       </div>
     );
   return (
-    <div className="shell">
-      <aside className="sidebar">
+    <div
+      className="shell places-shell"
+      style={{ "--sidebar-width": sidebarWidth + "px" } as React.CSSProperties}
+    >
+      {placeDialog && (
+        <PlaceDialog
+          place={placeDialog === "new" ? undefined : placeDialog}
+          records={units}
+          close={() => setPlaceDialog(null)}
+          save={savePlace}
+        />
+      )}
+      <aside
+        className={
+          "sidebar places-sidebar" + (mobileNavOpen ? " mobile-nav-open" : "")
+        }
+      >
+        <button
+          className="mobile-navigation-toggle"
+          aria-expanded={mobileNavOpen}
+          aria-controls="primary-navigation"
+          onClick={() => setMobileNavOpen(!mobileNavOpen)}
+        >
+          {mobileNavOpen ? "Hide navigation" : "Navigation"}
+        </button>
         <a className="brand" href="#" onClick={(e) => e.preventDefault()}>
           <span className="brand-mark">T</span> Titan
         </a>
         <div className="workspace-name">
           <span className="dot" /> Local workspace
-          <small>Shared memory for agents</small>
         </div>
-        <div className="nav-label">Workspace</div>
-        <nav aria-label="Workspace">
-          {["knowledge", "work", "decision", "evidence"].map((key) => (
-            <button
-              key={key}
-              className={view === key ? "nav active" : "nav"}
-              onClick={() => navigate(key)}
-            >
-              <span>{symbols[key]}</span>
-              {labels[key]}
-              <small>
-                {
-                  units.filter(
-                    (u) => u.kind === key && u.lifecycle === "active",
-                  ).length
-                }
-              </small>
-            </button>
-          ))}
-        </nav>
-        <div className="nav-label">Manage</div>
-        <nav aria-label="Manage workspace">
-          {["reviews", "audit", "learning", "removed"].map((key) => (
-            <button
-              key={key}
-              className={view === key ? "nav active" : "nav"}
-              onClick={() => navigate(key)}
-            >
-              <span>{symbols[key]}</span>
-              {labels[key]}
-              {key === "reviews" && reviewCount > 0 && (
-                <small className="notification">{reviewCount}</small>
-              )}
-            </button>
-          ))}
-        </nav>
+        <div className="sidebar-content" id="primary-navigation">
+          <PlacesNavigation
+            places={places}
+            orderKey={"titan:place-order:" + (workspace?.root ?? "")}
+            records={units}
+            placeId={placeId}
+            view={view}
+            selected={selected}
+            navigate={navigateTo}
+            openRecord={openRecord}
+            newPlace={() => void leaveEditor(() => setPlaceDialog("new"))}
+          />
+          {!!pageDrafts.length && (
+            <>
+              <div className="nav-label">Your drafts</div>
+              <nav aria-label="Your drafts">
+                {pageDrafts.map((d) => (
+                  <button
+                    key={d.id}
+                    className="draft-row"
+                    onClick={() =>
+                      void leaveEditor((saved) => {
+                        setPageEditor(saved?.id === d.id ? saved : d);
+                        setView(d.kind);
+                        setPlaceId(draftPlaces[d.id] ?? null);
+                        setSelected(d.source?.id ?? null);
+                        setAgentOpen(false);
+                        setDraft(null);
+                        setSelection("");
+                        setMobileNavOpen(false);
+                      })
+                    }
+                  >
+                    <span>{d.title || "Untitled page"}</span>
+                    <small>Unpublished{d.source ? " changes" : ""}</small>
+                  </button>
+                ))}
+              </nav>
+            </>
+          )}
+          <div className="nav-label">Manage</div>
+          <nav aria-label="Manage workspace">
+            {["reviews", "audit", "learning", "removed"].map((key) => (
+              <button
+                key={key}
+                className={view === key ? "nav active" : "nav"}
+                onClick={() => navigate(key)}
+              >
+                <span>{symbols[key]}</span>
+                {labels[key]}
+                {key === "reviews" && reviewCount > 0 && (
+                  <small className="notification">{reviewCount}</small>
+                )}
+              </button>
+            ))}
+          </nav>
+        </div>
         <div className="sidebar-bottom">
           <div className="agent-health">
             <span className="dot" />
@@ -356,7 +747,7 @@ export default function App() {
               : "Agent connected"}
             <small>
               {workspace?.settings.autonomy === "bounded"
-                ? "Review important changes"
+                ? "Review required"
                 : "Automatic changes enabled"}
             </small>
           </div>
@@ -367,16 +758,167 @@ export default function App() {
             <span>⚙</span>Settings
           </button>
         </div>
+        <div
+          className="sidebar-resize"
+          role="separator"
+          aria-label="Navigation width"
+          aria-orientation="vertical"
+          aria-valuemin={260}
+          aria-valuemax={360}
+          aria-valuenow={sidebarWidth}
+          tabIndex={0}
+          onPointerDown={resizeSidebar}
+          onPointerMove={(event) => {
+            if (event.currentTarget.hasPointerCapture(event.pointerId))
+              setWidth(event.clientX);
+          }}
+          onKeyDown={(event) => {
+            if (
+              ["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)
+            ) {
+              event.preventDefault();
+              setWidth(
+                event.key === "Home"
+                  ? 260
+                  : event.key === "End"
+                    ? 360
+                    : sidebarWidth + (event.key === "ArrowRight" ? 10 : -10),
+              );
+            }
+          }}
+        />
       </aside>
       <main>
         <header className="topbar">
-          <div>
-            <span className="breadcrumb">Workspace / </span>
-            {labels[view]}
-          </div>
-          <div className="top-actions">
-            <span className="local-pill">● Local workspace</span>
-            {["knowledge", "work", "decision", "evidence"].includes(view) && (
+          <nav className="breadcrumbs" aria-label="Breadcrumb">
+            {activePlace ? (
+              <>
+                <button
+                  className="breadcrumb-button"
+                  onClick={() => navigateTo("place", activePlace.id)}
+                >
+                  {activePlace.name}
+                </button>
+                <span className="breadcrumb" aria-hidden="true">
+                  /
+                </span>
+              </>
+            ) : (
+              <>
+                <button
+                  className="breadcrumb-button"
+                  onClick={() => navigateTo("all", null)}
+                >
+                  Workspace
+                </button>
+                <span className="breadcrumb" aria-hidden="true">
+                  /
+                </span>
+              </>
+            )}
+            <span className="breadcrumb-current" aria-current="page">
+              {pageEditor
+                ? "Draft"
+                : current
+                  ? recordTypeLabels[current.kind]
+                  : labels[view]}
+            </span>
+          </nav>
+          <form
+            className="search global-search"
+            role="search"
+            onSubmit={(event) => {
+              event.preventDefault();
+              const submittedQuery = query.trim();
+              const request = ++searchRequest.current;
+              void leaveEditor(() => {
+                void run(async () => {
+                  const results = submittedQuery
+                    ? await api("/context", "POST", { query: submittedQuery })
+                    : null;
+                  if (request !== searchRequest.current) return;
+                  navigateNow(placeId ? "place" : "all");
+                  setQuery(submittedQuery);
+                  setSearch(results);
+                  setAgentOpen(false);
+                });
+              });
+            }}
+          >
+            <select
+              aria-label="Search scope"
+              value={searchScope}
+              onChange={(event) => {
+                searchRequest.current += 1;
+                setSearchScope(event.target.value);
+              }}
+            >
+              <option value="everywhere">Everywhere</option>
+              {places.map((place) => (
+                <option key={place.id} value={place.id}>
+                  {place.name}
+                </option>
+              ))}
+            </select>
+            <input
+              aria-label="Search knowledge and work"
+              placeholder="Search records…"
+              value={query}
+              onChange={(event) => {
+                searchRequest.current += 1;
+                setQuery(event.target.value);
+                if (!event.target.value) setSearch(null);
+              }}
+            />
+            <button type="submit" aria-label="Search" disabled={busy}>
+              <svg
+                width="20"
+                height="20"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                aria-hidden="true"
+                focusable="false"
+              >
+                <circle cx="10.5" cy="10.5" r="6.5" />
+                <path d="m16 16 4.5 4.5" />
+              </svg>
+            </button>
+          </form>
+          <div
+            className="top-actions"
+            ref={setActionsHost}
+            id="document-actions"
+          >
+            {!current && !pageEditor && isRecordView && (
+              <div className="button-row">
+                <button className="primary" onClick={() => startPage()}>
+                  ＋ New page
+                </button>
+                <button
+                  onClick={() => {
+                    void leaveEditor(() => {
+                      setNewUnit(true);
+                      setSelected(null);
+                      setDraft(null);
+                      setInstruction("");
+                      setMessage("");
+                      openComposer();
+                    });
+                  }}
+                >
+                  Draft with agent
+                </button>
+              </div>
+            )}
+            {current && !pageEditor && isRecordView && (
+              <button disabled={busy} onClick={() => startPage(current)}>
+                Edit page
+              </button>
+            )}
+            {current && !pageEditor && isRecordView && (
               <button
                 className="agent-toggle"
                 aria-expanded={agentOpen}
@@ -388,6 +930,30 @@ export default function App() {
                 ✳ {agentOpen ? "Hide agent" : "Ask agent"}
               </button>
             )}
+            {current &&
+              !pageEditor &&
+              activePlace &&
+              activePlace.memberIds.includes(current.id) && (
+                <PageActionMenu>
+                  <button
+                    disabled={busy}
+                    onClick={() =>
+                      updatePlace(activePlace, {
+                        ...placeContent(activePlace),
+                        pinnedIds: activePlace.pinnedIds.includes(current.id)
+                          ? activePlace.pinnedIds.filter(
+                              (id) => id !== current.id,
+                            )
+                          : [...activePlace.pinnedIds, current.id],
+                      })
+                    }
+                  >
+                    {activePlace.pinnedIds.includes(current.id)
+                      ? "Unpin page"
+                      : "Pin page"}
+                  </button>
+                </PageActionMenu>
+              )}
           </div>
         </header>
         {error && (
@@ -398,423 +964,451 @@ export default function App() {
             </button>
           </div>
         )}
-        <div className="page-heading">
-          <div>
-            <h1>{labels[view]}</h1>
-            <p>
-              {view === "knowledge"
-                ? "Keep useful ideas and what you’ve learned in one place."
-                : view === "work"
-                  ? "Plan your next steps and keep work moving."
-                  : view === "reviews"
-                    ? "Review suggested changes with the context you need."
-                    : view === "learning"
-                      ? "Help Titan learn from your feedback."
-                      : view === "audit"
-                        ? "See what changed and why."
-                        : view === "removed"
-                          ? "Find removed records and restore them when you need to."
-                          : view === "settings"
-                            ? "Make Titan work the way you want."
-                            : "Keep the reasoning and evidence behind your work close by."}
-            </p>
+        {pageNotice && (
+          <div className="page-notice" role="status">
+            {pageNotice}
           </div>
-          {["knowledge", "work", "decision", "evidence"].includes(view) && (
-            <button
-              className="primary"
-              onClick={() => {
-                setNewUnit(true);
-                setSelected(null);
-                setDraft(null);
-                setInstruction("");
-                setMessage(
-                  "Share what you have in mind. I’ll prepare a draft for you to review.",
-                );
-                openComposer();
-              }}
-            >
-              ＋ New record
-            </button>
-          )}
-        </div>
-        {["knowledge", "work", "decision", "evidence"].includes(view) && (
-          <div className="workspace-grid">
-            <section className="record-browser">
-              <form
-                className="search"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void run(async () => {
-                    setSearch(
-                      query.trim()
-                        ? await api("/context", "POST", { query })
-                        : null,
-                    );
-                  });
-                }}
-              >
-                <span>⌕</span>
-                <input
-                  aria-label="Search knowledge and work"
-                  placeholder="Search records…"
-                  value={query}
-                  onChange={(e) => {
-                    setQuery(e.target.value);
-                    if (!e.target.value) setSearch(null);
-                  }}
+        )}
+        {!current && !pageEditor && (
+          <div className="page-heading">
+            {!(view === "settings" && integrationId) && <h1>{heading}</h1>}
+          </div>
+        )}
+        {isRecordView && (
+          <div
+            className={
+              "workspace-grid" +
+              (current || pageEditor ? " document-sheet" : "") +
+              (pageEditor ? " composing-page" : "")
+            }
+          >
+            {!current && !pageEditor && (
+              <div className="browse-canvas">
+                {search && (
+                  <div className="section-label">
+                    Search results <span>{list.length}</span>
+                  </div>
+                )}
+                <RecordOverview
+                  records={list}
+                  allRecords={units}
+                  place={resultPlace}
+                  openRecord={(id) => openRecord(id, resultPlace?.id ?? null)}
+                  organize={() => activePlace && setPlaceDialog(activePlace)}
+                  update={updatePlace}
+                  busy={busy}
+                  draftOverview={draftOverview}
                 />
-                <kbd>↵</kbd>
-              </form>
-              <div className="section-label">
-                {search ? "Search results" : labels[view]}{" "}
-                <span>{list.length}</span>
               </div>
-              <div className="record-list">
-                {list.map((u) => (
-                  <button
-                    key={u.id}
-                    className={
-                      "record-card " + (u.id === selected ? "selected" : "")
+            )}
+            {(current || pageEditor) && (
+              <section className="document-panel">
+                {pageEditor ? (
+                  <PageComposer
+                    key={pageEditor.id}
+                    ref={pageEditorRef}
+                    initial={pageEditor}
+                    publishDisabledReason={
+                      (
+                        units.find((u) => u.id === pageEditor.source?.id)
+                          ?.extensions?.["titan:confluence"] as any
+                      )?.owner === "confluence"
+                        ? !workspace?.confluence?.allowEdits
+                          ? "This connection is read only. Enable edits in Settings to save to Confluence."
+                          : (
+                                units.find(
+                                  (u) => u.id === pageEditor.source?.id,
+                                )?.extensions?.["titan:confluence"] as any
+                              )?.issues?.length
+                            ? "This page has source formatting Titan cannot safely write back. Your draft stays private."
+                            : undefined
+                        : undefined
                     }
-                    onClick={() => {
-                      setSelected(u.id);
-                      setNewUnit(false);
-                    }}
-                  >
-                    <div className="card-meta">
-                      <span>
-                        {symbols[u.kind]} {u.kind}
-                      </span>
-                      <span
-                        className={"tiny-dot " + u.validity}
-                        aria-label={u.validity}
-                      />
-                    </div>
-                    <h3>{u.title}</h3>
-                    <p>{u.body.replace(/[#*]/g, "").slice(0, 100)}</p>
-                    <div className="card-footer">
-                      <span>{u.validity}</span>
-                      <span>
-                        {new Date(u.updatedAt).toLocaleDateString(undefined, {
-                          month: "short",
-                          day: "numeric",
-                        })}
-                      </span>
-                    </div>
-                  </button>
-                ))}
-                {!list.length && (
-                  <div className="empty small">
-                    <span>◇</span>
-                    <h3>Your first record starts here</h3>
-                    <p>
-                      Choose New record to add an idea, decision, or next step.
-                    </p>
-                  </div>
-                )}
-              </div>
-            </section>
-            <section className="document-panel">
-              {current ? (
-                <>
-                  <div className="document-toolbar">
-                    <span className="badge">{current.kind}</span>
-                    <span className="revision">
-                      Revision {current.revision.slice(0, 7)}
-                    </span>
-                  </div>
-                  <h2>{current.title}</h2>
-                  <div className="metadata">
-                    <span className={"badge " + current.validity}>
-                      {current.validity}
-                    </span>
-                  </div>
-                  <details className="record-details">
-                    <summary>Record details</summary>
-                    <div className="metadata">
-                      <span className="badge">{current.authority}</span>
-                      <span className="badge">
-                        {current.status.replace("_", " ")}
-                      </span>
-                      {current.applicability.map((a) => (
-                        <span className="scope" key={a}>
-                          {a}
-                        </span>
-                      ))}
-                    </div>
-                  </details>
-                  {["superseded", "disputed"].includes(current.validity) && (
-                    <div className="notice">
-                      {current.validity === "superseded"
-                        ? "This guidance has been replaced. Review the newer version before using it."
-                        : "The evidence for this record conflicts. Review it before making a decision."}
-                    </div>
-                  )}
-                  <article className="markdown" ref={articleRef}>
-                    <Markdown
-                      components={{
-                        a: ({ href, children }) => (
-                          <a
-                            href={href}
-                            onClick={(e) => {
-                              if (href?.startsWith("#unit-")) {
-                                e.preventDefault();
-                                const unit = units.find(
-                                  (u) => u.id === href.slice(6),
-                                );
-                                if (unit) {
-                                  setSelected(unit.id);
-                                  setView(unit.kind);
-                                }
-                              }
-                            }}
-                          >
-                            {children}
-                          </a>
-                        ),
-                      }}
-                    >
-                      {current.body.replace(
-                        /(Implements|Supports|Supersedes|Contradicts|Blocks|Contains):\s*([0-9a-f-]{36})/gi,
-                        (_match, label, id) =>
-                          `${label}: [${units.find((u) => u.id === id)?.title ?? "Unavailable record"}](#unit-${id})`,
-                      )}
-                    </Markdown>
-                  </article>
-                  <div className="document-section">
-                    <div className="section-label">
-                      Connections{" "}
-                      <span>
-                        {
-                          relations.filter(
-                            (a) =>
-                              a.source === current.id ||
-                              a.target === current.id,
-                          ).length
-                        }
-                      </span>
-                    </div>
-                    {relations
-                      .filter(
-                        (a) =>
-                          a.source === current.id || a.target === current.id,
-                      )
-                      .map((a) => {
-                        const other = units.find(
-                          (u) =>
-                            u.id ===
-                            (a.source === current.id ? a.target : a.source),
-                        );
-                        const type = workspace?.settings.relationshipTypes.find(
-                          (t: any) => t.key === a.type,
-                        );
-                        return (
-                          <button
-                            className="relationship"
-                            key={a.id}
-                            onClick={() => {
-                              if (other) {
-                                setSelected(other.id);
-                                setView(other.kind);
-                              }
-                            }}
-                          >
-                            <span>
-                              {a.source === current.id
-                                ? type?.outward
-                                : type?.inward}
-                            </span>
-                            <strong>
-                              {other?.title ?? "Unavailable record"}
-                            </strong>
-                            <small>{a.state}</small>
-                          </button>
-                        );
-                      })}
-                    <p className="hint">
-                      Titan links related records and keeps the evidence with
-                      them.
-                    </p>
-                  </div>
-                  <details className="document-section">
-                    <summary>Revision history · {history.length}</summary>
-                    {history.map((u, i) => (
-                      <div className="history-row" key={u.revision + i}>
-                        <code>{u.revision.slice(0, 7)}</code>
-                        <span>{new Date(u.updatedAt).toLocaleString()}</span>
-                        <span>{u.validity}</span>
-                      </div>
-                    ))}
-                  </details>
-                </>
-              ) : (
-                <div className="empty document-empty">
-                  <div className="orb">◈</div>
-                  <h2>
-                    {newUnit
-                      ? "What’s on your mind?"
-                      : "Make room for a good idea"}
-                  </h2>
-                  <p>
-                    {newUnit
-                      ? "Share your idea with the agent. Titan will turn it into a connected record you can review."
-                      : "Open a record to explore it, or start something new with your agent."}
-                  </p>
-                  <button
-                    className="empty-action"
-                    onClick={() => {
-                      setNewUnit(true);
-                      setInstruction("");
-                      setMessage(
-                        "Share what you have in mind. I’ll prepare a draft for you to review.",
+                    publishLabel={
+                      (
+                        units.find((u) => u.id === pageEditor.source?.id)
+                          ?.extensions?.["titan:confluence"] as any
+                      )?.owner === "confluence"
+                        ? "Save to Confluence"
+                        : undefined
+                    }
+                    actionsHost={actionsHost}
+                    onAskAgent={openComposer}
+                    api={api}
+                    onSaved={(d) =>
+                      setPageDrafts((previous) => [
+                        d,
+                        ...previous.filter((item) => item.id !== d.id),
+                      ])
+                    }
+                    onClose={() => setPageEditor(null)}
+                    onDiscard={(id) => {
+                      setPageDrafts((previous) =>
+                        previous.filter((d) => d.id !== id),
                       );
-                      openComposer();
+                      setPageEditor(null);
                     }}
-                  >
-                    {newUnit ? "Share your idea →" : "＋ Create a record"}
-                  </button>
-                </div>
-              )}
-            </section>
-            <FloatingAgent
-              open={agentOpen}
-              onOpen={openComposer}
-              onClose={() => setAgentOpen(false)}
-              selection={!!selection}
-              subtitle={
-                workspace?.settings.provider === "fixture"
-                  ? "Demo · drag to move"
-                  : "Drag to move"
-              }
-            >
-              <div className="conversation-content">
-                <div className="agent-message">
-                  <span className="eyebrow">Let’s think it through</span>
-                  <p>
-                    {message ||
-                      "Share an idea or select some text to improve. I’ll prepare a draft you can review."}
-                  </p>
-                </div>
-                {selection && (
-                  <div className="selection" role="status">
-                    <div className="selection-heading">
-                      <span>Selected passage · added to context</span>
-                      <button
-                        type="button"
-                        aria-label="Clear selected passage"
-                        onClick={() => setSelection("")}
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <p title={selection}>“{selection}”</p>
-                  </div>
-                )}
-                {draft && (
-                  <div className="preview">
-                    <div className="section-label">Draft for review</div>
-                    <h3>{draft.draft.title}</h3>
-                    {draft.draft.operation ? (
-                      <p>
-                        {draft.draft.operation === "remove"
-                          ? "Remove from agent consideration"
-                          : JSON.stringify(draft.draft.patch)}
-                      </p>
-                    ) : (
-                      <div className="preview-body">
-                        <Markdown>{draft.draft.body}</Markdown>
+                    onPublished={async (unit) => {
+                      setPageDrafts((previous) =>
+                        previous.filter((d) => d.id !== pageEditor.id),
+                      );
+                      setPageEditor(null);
+                      setSelected(unit.id);
+                      setView(unit.kind);
+                      setSearch(null);
+                      setMessage(
+                        "Published. Titan is checking related knowledge and recording the change.",
+                      );
+                      setPageNotice(
+                        "Published. Titan is checking related knowledge.",
+                      );
+                      if (!pageEditor.source)
+                        await addPublishedToPlace(
+                          unit.id,
+                          draftPlaces[pageEditor.id] ?? null,
+                        ).catch(() =>
+                          setPageNotice(
+                            "Published. Add this record to the place through Organize place.",
+                          ),
+                        );
+                      await refresh().catch(() =>
+                        setError(
+                          "Your page was published, but Titan couldn’t refresh the view. Reload to see it.",
+                        ),
+                      );
+                    }}
+                  />
+                ) : current ? (
+                  <>
+                    <h1 className="document-title">{current.title}</h1>
+                    <RecordMetadata
+                      key={current.id}
+                      record={current}
+                      events={events}
+                      records={units}
+                      relationships={relations}
+                      openRecord={openRecord}
+                      prepareReview={() => {
+                        setInstruction(
+                          `Review the recorded basis for "${current.title}" (record ${current.id}). Explain what needs attention and prepare evidence connections or changes for my review.`,
+                        );
+                        openComposer();
+                      }}
+                    />
+                    {!!current.extensions?.["titan:confluence"] && (
+                      <ConfluenceSource
+                        key={current.id}
+                        source={current.extensions["titan:confluence"]}
+                        recordId={current.id}
+                        api={api}
+                        refresh={refresh}
+                      />
+                    )}
+                    {!!current.extensions?.["titan:sources"] && (
+                      <details className="record-details">
+                        <summary>Source records</summary>
+                        {Object.keys(
+                          current.extensions["titan:sources"] as Record<
+                            string,
+                            string
+                          >,
+                        ).map((id) => (
+                          <button
+                            key={id}
+                            disabled={
+                              !units.some(
+                                (u) => u.id === id && u.lifecycle === "active",
+                              )
+                            }
+                            onClick={() => openRecord(id)}
+                          >
+                            {units.find((u) => u.id === id)?.title ??
+                              "Unavailable record"}
+                          </button>
+                        ))}
+                      </details>
+                    )}
+                    {!!current.extensions?.["titan:sources"] &&
+                      Object.entries(
+                        current.extensions["titan:sources"] as Record<
+                          string,
+                          string
+                        >,
+                      ).some(
+                        ([id, revision]) =>
+                          !units.some(
+                            (u) =>
+                              u.id === id &&
+                              u.lifecycle === "active" &&
+                              u.revision === revision,
+                          ),
+                      ) && (
+                        <div className="notice">
+                          A source changed or was removed. Prepare a fresh
+                          overview before using this page as a basis.
+                        </div>
+                      )}
+
+                    {["superseded", "disputed"].includes(current.validity) && (
+                      <div className="notice">
+                        {current.validity === "superseded"
+                          ? "This guidance has been replaced. Review the newer version before using it."
+                          : "The evidence for this record conflicts. Review it before making a decision."}
                       </div>
                     )}
-                    <p className="hint">{draft.draft.justification}</p>
-                    <div className="button-row">
-                      <button
-                        className="primary"
-                        disabled={busy}
-                        onClick={() => void apply()}
+                    <article className="markdown" ref={articleRef}>
+                      <Markdown
+                        components={{
+                          a: ({ href, children }) => (
+                            <a
+                              href={href}
+                              onClick={(e) => {
+                                if (href?.startsWith("#unit-")) {
+                                  e.preventDefault();
+                                  const unit = units.find(
+                                    (u) => u.id === href.slice(6),
+                                  );
+                                  if (unit) {
+                                    void leaveEditor(() => {
+                                      setSelected(unit.id);
+                                      setView(unit.kind);
+                                    });
+                                  }
+                                }
+                              }}
+                            >
+                              {children}
+                            </a>
+                          ),
+                        }}
                       >
-                        Apply change
-                      </button>
-                      <button disabled={busy} onClick={() => setDraft(null)}>
-                        Discard
-                      </button>
+                        {current.body.replace(
+                          /(Implements|Supports|Supersedes|Contradicts|Blocks|Contains):\s*([0-9a-f-]{36})/gi,
+                          (_match, label, id) =>
+                            `${label}: [${units.find((u) => u.id === id)?.title ?? "Unavailable record"}](#unit-${id})`,
+                        )}
+                      </Markdown>
+                    </article>
+                    <div className="document-section">
+                      <div className="section-label">
+                        Connections{" "}
+                        <span>
+                          {
+                            relations.filter(
+                              (a) =>
+                                a.source === current.id ||
+                                a.target === current.id,
+                            ).length
+                          }
+                        </span>
+                      </div>
+                      {relations
+                        .filter(
+                          (a) =>
+                            a.source === current.id || a.target === current.id,
+                        )
+                        .map((a) => {
+                          const other = units.find(
+                            (u) =>
+                              u.id ===
+                              (a.source === current.id ? a.target : a.source),
+                          );
+                          const type =
+                            workspace?.settings.relationshipTypes.find(
+                              (t: any) => t.key === a.type,
+                            );
+                          return (
+                            <button
+                              className="relationship"
+                              key={a.id}
+                              onClick={() => {
+                                if (other) {
+                                  setSelected(other.id);
+                                  setView(other.kind);
+                                }
+                              }}
+                            >
+                              <span>
+                                {a.source === current.id
+                                  ? type?.outward
+                                  : type?.inward}
+                              </span>
+                              <strong>
+                                {other?.title ?? "Unavailable record"}
+                              </strong>
+                              <small>{a.state}</small>
+                            </button>
+                          );
+                        })}
                     </div>
-                  </div>
-                )}
-              </div>
-              <form
-                className="composer"
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void author();
-                }}
-              >
-                {newUnit && (
-                  <label className="kind-select">
-                    Capture as
-                    <select
-                      value={kind}
-                      onChange={(e) => setKind(e.target.value)}
-                    >
-                      {["knowledge", "work", "decision", "evidence"].map(
-                        (k) => (
-                          <option key={k} value={k}>
-                            {k}
-                          </option>
-                        ),
-                      )}
-                    </select>
-                  </label>
-                )}
-                <textarea
-                  ref={composerRef}
-                  aria-label="Message the workspace agent"
-                  placeholder={
-                    selection
-                      ? "How should this passage change?"
-                      : "What’s on your mind?"
-                  }
-                  value={instruction}
-                  onChange={(e) => setInstruction(e.target.value)}
-                />
-                <div className="composer-footer">
-                  <small>Review before applying</small>
-                  <button
-                    className="send"
-                    aria-label="Prepare agent draft"
-                    disabled={busy || !instruction.trim()}
-                  >
-                    {busy ? "…" : "↑"}
-                  </button>
-                </div>
-                {current && (
-                  <div className="quick-prompts">
-                    {current.kind === "work" && (
-                      <button
-                        type="button"
-                        onClick={() => setInstruction("Mark this work ready")}
-                      >
-                        Mark ready
-                      </button>
-                    )}
+                    <details className="document-section">
+                      <summary>Revision history · {history.length}</summary>
+                      {history.map((u, i) => (
+                        <div className="history-row" key={u.revision + i}>
+                          <code>{u.revision.slice(0, 7)}</code>
+                          <span>{new Date(u.updatedAt).toLocaleString()}</span>
+                          <span>{u.validity}</span>
+                        </div>
+                      ))}
+                    </details>
+                  </>
+                ) : (
+                  <div className="empty document-empty">
+                    <h2>
+                      {newUnit || !list.length
+                        ? "Create a page"
+                        : "Choose a record"}
+                    </h2>
                     <button
-                      type="button"
-                      onClick={() => setInstruction("Remove this record")}
+                      className="empty-action"
+                      onClick={() => startPage()}
                     >
-                      Remove
+                      ＋ Create a page
                     </button>
                   </div>
                 )}
-              </form>
-            </FloatingAgent>
+              </section>
+            )}
           </div>
         )}
+        <FloatingAgent
+          open={agentOpen}
+          onOpen={openComposer}
+          onClose={() => setAgentOpen(false)}
+          selection={!!selection}
+          subtitle={workspace?.settings.provider === "fixture" ? "Demo" : ""}
+        >
+          <div className="conversation-content">
+            {message && (
+              <div className="agent-message">
+                <p>{message}</p>
+              </div>
+            )}
+            {selection && (
+              <div className="selection" role="status">
+                <div className="selection-heading">
+                  <span>Selected passage</span>
+                  <button
+                    type="button"
+                    aria-label="Clear selected passage"
+                    onClick={() => setSelection("")}
+                  >
+                    ×
+                  </button>
+                </div>
+                <p title={selection}>“{selection}”</p>
+              </div>
+            )}
+            {draft && (
+              <div className="preview">
+                <div className="section-label">Draft for review</div>
+                <h3>{draft.draft.title}</h3>
+                {draft.draft.operation ? (
+                  <p>
+                    {draft.draft.operation === "remove"
+                      ? "Remove from agent consideration"
+                      : JSON.stringify(draft.draft.patch)}
+                  </p>
+                ) : (
+                  <div className="preview-body">
+                    <Markdown>{draft.draft.body}</Markdown>
+                  </div>
+                )}
+                <p className="hint">{draft.draft.justification}</p>
+                {draft.sources && (
+                  <details>
+                    <summary>
+                      Source records · {Object.keys(draft.sources).length}
+                    </summary>
+                    {Object.entries(draft.sources).map(([id, revision]) => (
+                      <div className="draft-source" key={id}>
+                        <span>
+                          {units.find((u) => u.id === id)?.title ??
+                            "Unavailable record"}
+                        </span>
+                        <code>{revision.slice(0, 7)}</code>
+                      </div>
+                    ))}
+                  </details>
+                )}
+                <div className="button-row">
+                  <button
+                    className="primary"
+                    disabled={busy}
+                    onClick={() => void apply()}
+                  >
+                    Apply change
+                  </button>
+                  <button disabled={busy} onClick={() => setDraft(null)}>
+                    Discard
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+          <form
+            className="composer"
+            onSubmit={(e) => {
+              e.preventDefault();
+              void author();
+            }}
+          >
+            {newUnit && (
+              <label className="kind-select">
+                Capture as
+                <select value={kind} onChange={(e) => setKind(e.target.value)}>
+                  {["knowledge", "work", "decision", "evidence"].map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            <textarea
+              ref={composerRef}
+              aria-label="Message the workspace agent"
+              placeholder={
+                selection
+                  ? "How should this passage change?"
+                  : "What’s on your mind?"
+              }
+              value={instruction}
+              onChange={(e) => setInstruction(e.target.value)}
+            />
+            <div className="composer-footer">
+              <button
+                className="send"
+                aria-label="Prepare agent draft"
+                disabled={busy || !instruction.trim()}
+              >
+                {busy ? "…" : "↑"}
+              </button>
+            </div>
+            {current && (
+              <div className="quick-prompts">
+                {current.kind === "work" && (
+                  <button
+                    type="button"
+                    onClick={() => setInstruction("Mark this work ready")}
+                  >
+                    Mark ready
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setInstruction("Remove this record")}
+                >
+                  Remove
+                </button>
+              </div>
+            )}
+          </form>
+        </FloatingAgent>
         {view === "reviews" && (
           <section className="wide-panel">
             {!reviewCount ? (
-              <Empty
-                title="Nothing waiting on you"
-                text="Agents handle routine organization. Consequential changes appear here with their evidence."
-              />
+              <Empty title="Nothing waiting on you" />
             ) : (
               <>
                 {reviews.relationships.map((a: Relationship) => (
@@ -981,186 +1575,214 @@ export default function App() {
                 </div>
               ))}
             {!units.some((u) => u.lifecycle === "removed") && (
-              <Empty
-                title="No removed records"
-                text="Removed records will appear here. You can restore them whenever you need to."
-              />
+              <Empty title="No removed records" />
             )}
           </section>
         )}
         {view === "settings" && workspace && (
-          <section className="settings-grid">
-            <div className="wide-panel">
-              <h2>Repository</h2>
-              <p className="hint">{workspace.root}</p>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void run(async () => {
-                    await api("/workspace", "POST", { path: localPath });
-                    await refresh();
-                    setSelected(null);
-                  });
-                }}
-              >
-                <label>
-                  Local repository path
-                  <input
-                    value={localPath}
-                    onChange={(e) => setLocalPath(e.target.value)}
-                    placeholder="/path/to/your/repository"
-                  />
-                </label>
-                <button disabled={busy || !localPath}>
-                  Connect local repository
-                </button>
-              </form>
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  void run(async () => {
-                    await api("/workspace", "POST", { github });
-                    await refresh();
-                  });
-                }}
-              >
-                <label>
-                  GitHub repository URL
-                  <input
-                    value={github}
-                    onChange={(e) => setGithub(e.target.value)}
-                    placeholder="https://github.com/owner/repository"
-                  />
-                </label>
-                <button disabled={busy || !github}>Connect GitHub</button>
-              </form>
-              <div className="button-row">
-                <button
-                  disabled={busy}
-                  onClick={() =>
-                    void run(async () => {
-                      const r = await api("/publish", "POST", {});
-                      setMessage("Published to " + r.branch);
-                      await refresh();
-                    })
-                  }
-                >
-                  Publish workspace branch
-                </button>
-                <button
-                  onClick={() =>
-                    void run(async () => {
-                      await api("/reindex", "POST", {});
-                      await refresh();
-                    })
-                  }
-                >
-                  Rebuild index
-                </button>
-              </div>
-              {workspace.issues.map((i: any) => (
-                <div className="notice" key={i.path}>
-                  {i.path}: {i.message}
-                </div>
+          <SettingsShell
+            section={settingsSection}
+            navigate={openSettingsSection}
+          >
+            {settingsSection === "integrations" &&
+              (integrationId ? (
+                <IntegrationConfiguration
+                  key={integrationId}
+                  id={integrationId}
+                  api={api}
+                  refresh={refresh}
+                  back={() => openIntegration(null)}
+                />
+              ) : (
+                <IntegrationCatalog api={api} open={openIntegration} />
               ))}
-            </div>
-            <div className="wide-panel">
-              <h2>Intelligence & autonomy</h2>
-              <SettingsForm
-                settings={workspace.settings}
-                busy={busy}
-                save={(patch) =>
-                  run(async () => {
-                    await api("/settings", "PATCH", patch);
-                    await refresh();
-                  })
-                }
-              />
-              <p className="hint">
-                API keys are read from server environment variables. OpenAI:{" "}
-                {workspace.credentials.openai ? "configured" : "not configured"}{" "}
-                · Anthropic:{" "}
-                {workspace.credentials.anthropic
-                  ? "configured"
-                  : "not configured"}
-              </p>
-              <div className="notice">
-                Fixture mode uses explicit references for deterministic
-                relationships. Live modes infer relationships from supplied
-                context.
-              </div>
-            </div>
-            <div className="wide-panel">
-              <h2>Agent access</h2>
-              <p>
-                Create a read/write token for MCP and external workflows. Save
-                it now; it is shown only when created.
-              </p>
-              <button
-                onClick={() =>
-                  void run(async () => {
-                    setIntegrationToken(
-                      (
-                        await api("/tokens", "POST", {
-                          scopes: ["read", "write"],
-                        })
-                      ).token,
-                    );
-                  })
-                }
-              >
-                Create integration token
-              </button>
-              {integrationToken && (
-                <>
+            {settingsSection === "repository" && (
+              <div className="wide-panel">
+                <h2>Repository</h2>
+                <p className="hint">{workspace.root}</p>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run(async () => {
+                      await api("/workspace", "POST", { path: localPath });
+                      await refresh();
+                      setSelected(null);
+                    });
+                  }}
+                >
                   <label>
-                    Integration token
-                    <input readOnly type="password" value={integrationToken} />
+                    Local repository path
+                    <input
+                      value={localPath}
+                      onChange={(e) => setLocalPath(e.target.value)}
+                      placeholder="/path/to/your/repository"
+                    />
                   </label>
+                  <button disabled={busy || !localPath}>
+                    Connect local repository
+                  </button>
+                </form>
+                <form
+                  onSubmit={(e) => {
+                    e.preventDefault();
+                    void run(async () => {
+                      await api("/workspace", "POST", { github });
+                      await refresh();
+                    });
+                  }}
+                >
+                  <label>
+                    GitHub repository URL
+                    <input
+                      value={github}
+                      onChange={(e) => setGithub(e.target.value)}
+                      placeholder="https://github.com/owner/repository"
+                    />
+                  </label>
+                  <button disabled={busy || !github}>Connect GitHub</button>
+                </form>
+                <div className="button-row">
                   <button
+                    disabled={busy}
                     onClick={() =>
-                      void navigator.clipboard.writeText(integrationToken)
+                      void run(async () => {
+                        const r = await api("/publish", "POST", {});
+                        setMessage("Published to " + r.branch);
+                        await refresh();
+                      })
                     }
                   >
-                    Copy token
+                    Publish workspace branch
                   </button>
-                </>
-              )}
-              <p className="hint">
-                Set TITAN_AGENT_TOKEN, then run npm run mcp. Webhooks use
-                TITAN_WEBHOOK_SECRET.
-              </p>
-            </div>
-            <div className="wide-panel">
-              <h2>Background operations</h2>
-              {workspace.jobs.map((j: any) => (
-                <div className="job-row" key={j.id}>
-                  <span>{j.kind}</span>
-                  <span className="badge">{j.status}</span>
-                  {j.error && <small>{j.error}</small>}
+                  <button
+                    onClick={() =>
+                      void run(async () => {
+                        await api("/reindex", "POST", {});
+                        await refresh();
+                      })
+                    }
+                  >
+                    Rebuild index
+                  </button>
                 </div>
-              ))}
-            </div>
-          </section>
+                {workspace.issues.map((i: any) => (
+                  <div className="notice" key={i.path}>
+                    {i.path}: {i.message}
+                  </div>
+                ))}
+              </div>
+            )}
+            {settingsSection === "intelligence" && (
+              <div className="wide-panel">
+                <h2>Intelligence & autonomy</h2>
+                <SettingsForm
+                  settings={workspace.settings}
+                  credentials={workspace.credentials}
+                  act={run}
+                  refresh={refresh}
+                  busy={busy}
+                />
+                <details className="document-section">
+                  <summary>Connection details</summary>
+                  <p className="hint">
+                    API keys are stored in private server state or supplied
+                    through environment variables. OpenAI:{" "}
+                    {workspace.credentials.openai
+                      ? "configured"
+                      : "not configured"}{" "}
+                    · Anthropic:{" "}
+                    {workspace.credentials.anthropic
+                      ? "configured"
+                      : "not configured"}{" "}
+                    · Custom:{" "}
+                    {workspace.credentials.custom
+                      ? "configured"
+                      : "not configured"}
+                  </p>
+                  <div className="notice">
+                    Fixture mode uses explicit references for deterministic
+                    relationships. Live modes infer relationships from supplied
+                    context.
+                  </div>
+                </details>
+              </div>
+            )}
+            {settingsSection === "access" && (
+              <div className="wide-panel">
+                <h2>Agent access</h2>
+                <p>Read/write access. The token is shown only once.</p>
+                <button
+                  onClick={() =>
+                    void run(async () => {
+                      setIntegrationToken(
+                        (
+                          await api("/tokens", "POST", {
+                            scopes: ["read", "write"],
+                          })
+                        ).token,
+                      );
+                    })
+                  }
+                >
+                  Create integration token
+                </button>
+                {integrationToken && (
+                  <>
+                    <label>
+                      Integration token
+                      <input
+                        readOnly
+                        type="password"
+                        value={integrationToken}
+                      />
+                    </label>
+                    <button
+                      onClick={() =>
+                        void navigator.clipboard.writeText(integrationToken)
+                      }
+                    >
+                      Copy token
+                    </button>
+                  </>
+                )}
+                <details className="document-section">
+                  <summary>Setup instructions</summary>
+                  <p className="hint">
+                    Set TITAN_AGENT_TOKEN, then run npm run mcp. Webhooks use
+                    TITAN_WEBHOOK_SECRET.
+                  </p>
+                </details>
+              </div>
+            )}
+            {settingsSection === "operations" && (
+              <div className="wide-panel">
+                <h2>Background operations</h2>
+                {!workspace.jobs.length && (
+                  <p className="hint">No background operations are queued.</p>
+                )}
+                {workspace.jobs.map((j: any) => (
+                  <div className="job-row" key={j.id}>
+                    <span>{j.kind}</span>
+                    <span className="badge">{j.status}</span>
+                    {j.error && <small>{j.error}</small>}
+                  </div>
+                ))}
+              </div>
+            )}
+          </SettingsShell>
         )}
         {view === "learning" && workspace && (
           <section className="wide-panel">
             <div className="learning-summary">
               <span className="agent-icon">⌘</span>
               <div>
-                <h2>Your deployment’s learning loop</h2>
+                <h2>Active model</h2>
                 <p>
                   Active ranker:{" "}
                   <strong>{workspace.settings.activeModel}</strong>
                 </p>
               </div>
             </div>
-            <p>
-              Human corrections and review outcomes form a local, versioned
-              dataset. Candidate baselines run safety evaluations before
-              activation. Custom training is deferred until suitable labels
-              exist.
-            </p>
             <div className="button-row">
               <button
                 className="primary"
@@ -1230,49 +1852,72 @@ export default function App() {
             ))}
           </section>
         )}
-        <footer className="page-footer">
-          <span>Your ideas, with the whole story.</span>
-          <span>Titan</span>
-        </footer>
       </main>
     </div>
   );
 }
-function Empty({ title, text }: { title: string; text: string }) {
+function Empty({ title }: { title: string }) {
   return (
     <div className="empty">
-      <span>◇</span>
       <h2>{title}</h2>
-      <p>{text}</p>
     </div>
   );
 }
 function SettingsForm({
+  credentials,
+  act,
+  refresh,
   settings,
   busy,
-  save,
 }: {
+  credentials: Record<string, boolean>;
+  act: (fn: () => Promise<void>) => Promise<void>;
+  refresh: () => Promise<void>;
   settings: any;
   busy: boolean;
-  save: (patch: any) => Promise<void>;
 }) {
+  const [apiKey, setApiKey] = useState("");
+  const [connectionMessage, setConnectionMessage] = useState("");
   const [provider, setProvider] = useState(settings.provider),
     [model, setModel] = useState(settings.model),
     [autonomy, setAutonomy] = useState(settings.autonomy),
     [webhook, setWebhook] = useState(settings.webhookUrl),
     [embedding, setEmbedding] = useState(settings.embeddingModel);
+  const [baseUrl, setBaseUrl] = useState(settings.providerBaseUrl ?? "");
+  const providerName =
+    provider === "openai"
+      ? "OpenAI"
+      : provider === "anthropic"
+        ? "Claude"
+        : "Custom provider";
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        void save({
-          provider,
-          model,
-          autonomy,
-          webhookUrl: webhook,
-          embeddingModel: embedding,
-          credentialRef:
-            provider === "anthropic" ? "ANTHROPIC_API_KEY" : "OPENAI_API_KEY",
+        void act(async () => {
+          if (provider !== "fixture" && apiKey.trim()) {
+            await api("/intelligence/credentials", "PUT", {
+              provider,
+              apiKey: apiKey.trim(),
+            });
+            setApiKey("");
+          }
+          await api("/settings", "PATCH", {
+            provider,
+            model,
+            autonomy,
+            webhookUrl: webhook,
+            embeddingModel: embedding,
+            credentialRef:
+              provider === "anthropic"
+                ? "ANTHROPIC_API_KEY"
+                : provider === "custom"
+                  ? "CUSTOM_API_KEY"
+                  : "OPENAI_API_KEY",
+            providerBaseUrl: provider === "custom" ? baseUrl : "",
+          });
+          await refresh();
+          setConnectionMessage("Intelligence settings saved.");
         });
       }}
     >
@@ -1281,24 +1926,182 @@ function SettingsForm({
         <select
           value={provider}
           onChange={(e) => {
+            setApiKey("");
+            setConnectionMessage("");
             setProvider(e.target.value);
             setModel(e.target.value === "fixture" ? "fixture-v1" : "");
           }}
         >
           <option value="fixture">Deterministic demo</option>
           <option value="openai">OpenAI</option>
-          <option value="anthropic">Anthropic</option>
+          <option value="anthropic">Claude (Anthropic)</option>
+          <option value="custom">Custom (OpenAI-compatible)</option>
         </select>
       </label>
+      {provider === "custom" && (
+        <label>
+          API base URL
+          <input
+            required
+            type="url"
+            value={baseUrl}
+            onChange={(e) => {
+              setBaseUrl(e.target.value);
+              setConnectionMessage("");
+            }}
+            placeholder="https://your-provider.example/v1"
+          />
+          <span className="hint">
+            Use an OpenAI-compatible Chat Completions endpoint. Local servers
+            can use HTTP on localhost.
+          </span>
+        </label>
+      )}
       <label>
-        Model ID
+        {provider === "fixture" ? "Demo model" : `${providerName} model ID`}
         <input
           required
+          readOnly={provider === "fixture"}
           value={model}
           onChange={(e) => setModel(e.target.value)}
-          placeholder="Choose an available model explicitly"
+          placeholder={
+            provider === "anthropic"
+              ? "Enter your Claude model ID"
+              : provider === "custom"
+                ? "Enter the model ID served by your endpoint"
+                : "Enter your OpenAI model ID"
+          }
         />
       </label>
+      {provider !== "fixture" && (
+        <div className="document-section">
+          <label>
+            {providerName} API key{provider === "custom" ? " (optional)" : ""}
+            <input
+              type="password"
+              autoComplete="off"
+              spellCheck={false}
+              value={apiKey}
+              onChange={(e) => {
+                setApiKey(e.target.value);
+                setConnectionMessage("");
+              }}
+              placeholder={
+                credentials[provider]
+                  ? "A key is configured. Enter a new key to replace it."
+                  : "Paste your API key"
+              }
+            />
+          </label>
+          <p className="hint">
+            {credentials[provider]
+              ? "API key configured."
+              : provider === "custom"
+                ? "Leave the key empty if your endpoint does not require authentication."
+                : "Add an API key to connect."}{" "}
+            Titan stores your key on this server, outside the workspace
+            repository.
+          </p>
+          {provider === "openai" && (
+            <a
+              href="https://platform.openai.com/api-keys"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Create an OpenAI API key
+            </a>
+          )}
+          {provider === "anthropic" && (
+            <a
+              href="https://console.anthropic.com/settings/keys"
+              target="_blank"
+              rel="noreferrer"
+            >
+              Create an Anthropic API key
+            </a>
+          )}
+          <div className="intelligence-credential-actions">
+            <button
+              type="button"
+              disabled={busy || !apiKey.trim()}
+              onClick={() =>
+                void act(async () => {
+                  setConnectionMessage("");
+                  await api("/intelligence/credentials", "PUT", {
+                    provider,
+                    apiKey: apiKey.trim(),
+                  });
+                  setApiKey("");
+                  setConnectionMessage("API key saved.");
+                  await refresh();
+                })
+              }
+            >
+              Save API key
+            </button>
+            <button
+              type="button"
+              disabled={
+                busy ||
+                !model.trim() ||
+                (provider !== "custom" &&
+                  !apiKey.trim() &&
+                  !credentials[provider]) ||
+                (provider === "custom" && !baseUrl.trim())
+              }
+              onClick={() =>
+                void act(async () => {
+                  setConnectionMessage("");
+                  if (apiKey.trim()) {
+                    await api("/intelligence/credentials", "PUT", {
+                      provider,
+                      apiKey: apiKey.trim(),
+                    });
+                    setApiKey("");
+                    await refresh();
+                  }
+                  await api("/intelligence/test", "POST", {
+                    provider,
+                    model,
+                    providerBaseUrl: provider === "custom" ? baseUrl : "",
+                  });
+                  setConnectionMessage(
+                    "Connected. This model is ready to use. Save operating policy to use it in Titan.",
+                  );
+                })
+              }
+            >
+              Test connection
+            </button>
+            <button
+              type="button"
+              disabled={busy || !credentials[provider]}
+              onClick={() =>
+                void act(async () => {
+                  setConnectionMessage("");
+                  await api("/intelligence/credentials", "PUT", {
+                    provider,
+                    apiKey: "",
+                  });
+                  setApiKey("");
+                  await refresh();
+                  setConnectionMessage(
+                    "Saved key removed. A server environment key, if supplied, remains available.",
+                  );
+                })
+              }
+            >
+              Remove saved key
+            </button>
+          </div>
+          <p className="hint" role="status">
+            {connectionMessage}
+          </p>
+          <p className="hint">
+            Testing makes a small model request and may incur API usage charges.
+          </p>
+        </div>
+      )}
       <label>
         Autonomy
         <select value={autonomy} onChange={(e) => setAutonomy(e.target.value)}>
@@ -1308,14 +2111,21 @@ function SettingsForm({
           <option value="full">Full — automatic within domain rules</option>
         </select>
       </label>
-      <label>
-        OpenAI embedding model (optional)
-        <input
-          value={embedding}
-          onChange={(e) => setEmbedding(e.target.value)}
-          placeholder="Leave empty for full-text + graph retrieval"
-        />
-      </label>
+      <details className="document-section">
+        <summary>Search embeddings (OpenAI)</summary>
+        <p className="hint">
+          Optional embeddings use a separate OpenAI key and model, regardless of
+          your authoring provider. Full-text and graph search work without them.
+        </p>
+        <label>
+          OpenAI embedding model (optional)
+          <input
+            value={embedding}
+            onChange={(e) => setEmbedding(e.target.value)}
+            placeholder="Leave empty for full-text + graph retrieval"
+          />
+        </label>
+      </details>
       <label>
         Work-ready webhook (optional)
         <input

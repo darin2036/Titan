@@ -1,5 +1,16 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useLayoutEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { clampAgentPosition } from "./agent-position";
+
+function visibleViewport() {
+  const viewport = window.visualViewport;
+  return {
+    width: viewport?.width ?? window.innerWidth,
+    height: viewport?.height ?? window.innerHeight,
+    left: viewport?.offsetLeft ?? 0,
+    top: viewport?.offsetTop ?? 0,
+  };
+}
 
 export default function FloatingAgent({
   open,
@@ -16,10 +27,11 @@ export default function FloatingAgent({
   subtitle: string;
   children: React.ReactNode;
 }) {
-  const [position, setPosition] = useState({
-    x: window.innerWidth - 76,
-    y: window.innerHeight - 76,
-  });
+  const [viewport, setViewport] = useState(visibleViewport);
+  const [position, setPosition] = useState(() => ({
+    x: viewport.left + viewport.width - 76,
+    y: viewport.top + viewport.height - 76,
+  }));
   const launcher = useRef<HTMLButtonElement>(null);
   const drag = useRef<{
     x: number;
@@ -29,15 +41,23 @@ export default function FloatingAgent({
   } | null>(null);
   const suppressClick = useRef(false);
   const fit = (p: typeof position) =>
-    clampAgentPosition(p, { width: innerWidth, height: innerHeight }, open);
-  useEffect(() => {
-    const resize = () =>
-      setPosition((p) =>
-        clampAgentPosition(p, { width: innerWidth, height: innerHeight }, open),
-      );
+    clampAgentPosition(p, visibleViewport(), open);
+  const fittedPosition = clampAgentPosition(position, viewport, open);
+  useLayoutEffect(() => {
+    const resize = () => {
+      const next = visibleViewport();
+      setViewport(next);
+      setPosition((p) => clampAgentPosition(p, next, open));
+    };
     resize();
     window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
+    window.visualViewport?.addEventListener("resize", resize);
+    window.visualViewport?.addEventListener("scroll", resize);
+    return () => {
+      window.removeEventListener("resize", resize);
+      window.visualViewport?.removeEventListener("resize", resize);
+      window.visualViewport?.removeEventListener("scroll", resize);
+    };
   }, [open]);
   function close() {
     onClose();
@@ -53,7 +73,7 @@ export default function FloatingAgent({
       drag.current = {
         x: e.clientX,
         y: e.clientY,
-        origin: position,
+        origin: fittedPosition,
         moved: false,
       };
       suppressClick.current = false;
@@ -80,10 +100,10 @@ export default function FloatingAgent({
       suppressClick.current = false;
     },
   };
-  return (
+  return createPortal(
     <div
       className="floating-agent"
-      style={{ left: position.x, top: position.y }}
+      style={{ left: fittedPosition.x, top: fittedPosition.y }}
       onKeyDown={(e) => {
         if (e.key === "Escape" && open) {
           e.stopPropagation();
@@ -96,6 +116,10 @@ export default function FloatingAgent({
         id="workspace-agent"
         aria-label="Workspace agent"
         hidden={!open}
+        style={{
+          width: Math.min(360, viewport.width - 24),
+          height: Math.min(520, viewport.height - 100),
+        }}
       >
         <div className="conversation-heading" {...movement}>
           <span className="agent-icon" aria-hidden="true">
@@ -103,7 +127,7 @@ export default function FloatingAgent({
           </span>
           <div className="agent-heading-copy">
             <strong>Your agent</strong>
-            <small>{subtitle}</small>
+            {subtitle && <small>{subtitle}</small>}
           </div>
           <span className="agent-grip" aria-hidden="true">
             ⠿
@@ -157,6 +181,7 @@ export default function FloatingAgent({
           />
         )}
       </button>
-    </div>
+    </div>,
+    document.body,
   );
 }

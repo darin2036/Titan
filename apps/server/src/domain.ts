@@ -1,3 +1,5 @@
+import { ConnectedStorage } from "./connected-storage.ts";
+import { assessReliability } from "../../shared/reliability.ts";
 import {
   type StorageAdapter,
   type Change,
@@ -8,6 +10,8 @@ import {
 import { Index } from "./index.ts";
 import {
   UnitSchema,
+  ComposerContentSchema,
+  type ComposerDraft,
   SettingsSchema,
   AssertionSchema,
   FeedbackSchema,
@@ -24,6 +28,8 @@ import {
   authorize,
 } from "./contracts.ts";
 import { z } from "zod";
+import { PlaceContentSchema, PlaceSchema } from "./places.ts";
+import type { Place, PlaceView, PlaceSuggestion } from "../../shared/places.ts";
 export const OWNER: Principal = { id: "owner", role: "human", scopes: ["*"] };
 export const INFERENCE: Principal = {
   id: "titan-intelligence",
@@ -42,15 +48,19 @@ const NewUnit = UnitSchema.omit({
   updatedAt: true,
   lifecycle: true,
 });
-const EditUnit = UnitSchema.pick({
-  title: true,
-  body: true,
-  status: true,
-  validity: true,
-  authority: true,
-  applicability: true,
-  extensions: true,
-}).partial();
+// Creation defaults must not reset metadata omitted from a revision patch.
+const EditUnit = z
+  .object({
+    title: UnitSchema.shape.title,
+    body: UnitSchema.shape.body,
+    status: UnitSchema.shape.status.removeDefault(),
+    validity: UnitSchema.shape.validity.removeDefault(),
+    authority: UnitSchema.shape.authority.removeDefault(),
+    applicability: UnitSchema.shape.applicability.removeDefault(),
+    extensions: UnitSchema.shape.extensions.removeDefault(),
+  })
+  .partial()
+  .strict();
 export class Domain {
   issues: { path: string; message: string }[] = [];
   constructor(
@@ -65,6 +75,102 @@ export class Domain {
     return SettingsSchema.parse(
       JSON.parse(this.storage.read(".titan/workspace.json")!),
     );
+  }
+  places(p: Principal): PlaceView[] {
+    human(p);
+    authorize(p, "read");
+    const units = this.records(p);
+    const visible = new Map(units.map((u) => [u.id, u]));
+    const links = this.assertions(p).filter(
+      (a) =>
+        a.state === "accepted" &&
+        [a.source, a.target, ...a.evidence].every(
+          (id) =>
+            visible.has(id) && visible.get(id)!.revision === a.revisions[id],
+        ),
+    );
+    return this.storage
+      .files(".titan/places")
+      .filter((path) => path.endsWith(".json"))
+      .map((path) => {
+        const raw = this.storage.read(path)!;
+        const place: Place = PlaceSchema.parse(JSON.parse(raw));
+        const suggestions = new Map<string, PlaceSuggestion>();
+        if (place.organization === "assisted") {
+          for (const link of links) {
+            const sourceMember = place.memberIds.includes(link.source);
+            const targetMember = place.memberIds.includes(link.target);
+            if (sourceMember === targetMember) continue;
+            const recordId = sourceMember ? link.target : link.source;
+            const entry = suggestions.get(recordId) ?? {
+              recordId,
+              connections: [],
+            };
+            entry.connections.push({
+              id: link.id,
+              anchorId: sourceMember ? link.source : link.target,
+              type: link.type,
+              justification: link.justification,
+              evidence: link.evidence,
+            });
+            suggestions.set(recordId, entry);
+          }
+        }
+        return {
+          ...place,
+          revision: hash(raw),
+          suggestions: [...suggestions.values()],
+        };
+      })
+      .sort(
+        (a, b) =>
+          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id),
+      );
+  }
+  savePlace(
+    p: Principal,
+    input: unknown,
+    id?: string,
+    revision?: string,
+  ): PlaceView {
+    human(p);
+    authorize(p, "write");
+    if (id) z.string().uuid().parse(id);
+    const content = PlaceContentSchema.parse(input);
+    const before = id
+      ? this.places(p).find((place) => place.id === id)
+      : undefined;
+    if (id) demand(before, 404, "This place is unavailable");
+    if (before)
+      demand(
+        before.revision === revision,
+        409,
+        "This place changed in another window. Reopen it before saving.",
+      );
+    // Existing unavailable records may be retained so restore keeps their membership.
+    const added = content.memberIds.filter(
+      (id) => !before?.memberIds.includes(id),
+    );
+    const units = added.map((id) => this.get(p, id));
+    const place: Place = {
+      ...content,
+      schemaVersion: 1,
+      id: id ?? uid(),
+      createdAt: before?.createdAt ?? now(),
+      updatedAt: now(),
+    };
+    this.commit(
+      [{ path: `.titan/places/${place.id}.json`, content: json(place) }],
+      this.event(
+        p,
+        before ? "organize_place" : "create_place",
+        units,
+        "Owner organized a workspace place",
+        "applied",
+        { entities: [place.id, ...units.map((u) => u.id)] },
+      ),
+    );
+    return this.places(p).find((p) => p.id === place.id)!;
   }
   private eligible(units: RecordView[]) {
     const byId = new Map(units.map((u) => [u.id, u]));
@@ -92,7 +198,120 @@ export class Domain {
     this.reconcile();
     const units = this.index.all();
     const eligible = this.eligible(units);
-    return units.filter((u) => includeRemoved || eligible.has(u.id));
+    const hidden =
+      this.storage instanceof ConnectedStorage
+        ? this.storage.hiddenIds()
+        : new Set<string>();
+    const accessible = (u: RecordView, seen = new Set<string>()): boolean => {
+      if (hidden.has(u.id) || seen.has(u.id)) return false;
+      const refs = u.extensions["titan:sources"];
+      if (!refs || typeof refs !== "object" || Array.isArray(refs)) return true;
+      return Object.keys(refs).every(
+        (id) =>
+          !hidden.has(id) &&
+          (!units.find((r) => r.id === id) ||
+            accessible(
+              units.find((r) => r.id === id)!,
+              new Set([...seen, u.id]),
+            )),
+      );
+    };
+    return units.filter(
+      (u) => accessible(u) && (includeRemoved || eligible.has(u.id)),
+    );
+  }
+  reliability(p: Principal, id: string, scope: string[] = []) {
+    const units = this.records(p);
+    const record = units.find((u) => u.id === id);
+    demand(record, 404, "Record unavailable");
+    return assessReliability(record, units, this.assertions(p), scope);
+  }
+  observeConnected(input: unknown, before?: RecordView) {
+    const unit = UnitSchema.parse(input);
+    demand(
+      this.storage instanceof ConnectedStorage,
+      422,
+      "Connected storage is unavailable",
+    );
+    return this.writeUnit(
+      { id: "confluence", role: "agent", scopes: ["read", "write"] },
+      unit,
+      before,
+      "confluence_observed",
+      "Confluence source revision observed",
+    );
+  }
+  proposeConnectedLinks(pairs: { source: string; target: string }[]) {
+    const actor: Principal = {
+      id: "confluence",
+      role: "agent",
+      scopes: ["read", "write"],
+    };
+    const units = this.records(actor);
+    const existing = this.assertions(actor);
+    const changes: Change[] = [];
+    const touched = new Map<string, RecordView>();
+    const event = this.event(
+      actor,
+      "confluence_links",
+      [],
+      "Confluence links proposed as connections; they do not establish support",
+      "proposed",
+    );
+    for (const pair of pairs) {
+      if (pair.source === pair.target) continue;
+      const source = units.find((u) => u.id === pair.source);
+      const target = units.find((u) => u.id === pair.target);
+      if (!source || !target) continue;
+      const prior = existing.find(
+        (a) =>
+          a.source === source.id &&
+          a.target === target.id &&
+          a.type === "relates" &&
+          ["accepted", "proposed"].includes(a.state),
+      );
+      if (
+        prior &&
+        prior.revisions[source.id] === source.revision &&
+        prior.revisions[target.id] === target.revision
+      )
+        continue;
+      if (prior)
+        changes.push({
+          path: `.titan/assertions/${prior.id}.json`,
+          content: json({ ...prior, state: "superseded" }),
+        });
+      const assertion = AssertionSchema.parse({
+        schemaVersion: 1,
+        id: uid(),
+        ...pair,
+        type: "relates",
+        state: "proposed",
+        justification: "The Confluence page links to this connected page.",
+        evidence: [],
+        revisions: {
+          [source.id]: source.revision,
+          [target.id]: target.revision,
+        },
+        activity: event.activity,
+        createdAt: now(),
+      });
+      changes.push({
+        path: `.titan/assertions/${assertion.id}.json`,
+        content: json(assertion),
+      });
+      touched.set(source.id, source);
+      touched.set(target.id, target);
+      existing.push(assertion);
+    }
+    if (changes.length)
+      this.commit(changes, {
+        ...event,
+        entities: [...touched.keys()],
+        revisions: Object.fromEntries(
+          [...touched].map(([id, u]) => [id, u.revision]),
+        ),
+      });
   }
   get(p: Principal, id: string, includeRemoved = false) {
     const u = this.records(p, includeRemoved).find((u) => u.id === id);
@@ -186,6 +405,22 @@ export class Domain {
     authorize(p, "write");
     const data = NewUnit.parse(input);
     demand(
+      !data.extensions["titan:confluence"],
+      422,
+      "Confluence provenance is managed by the connection",
+    );
+    if (data.extensions["titan:sources"]) {
+      const sources = z
+        .record(z.string().uuid(), z.string().min(1))
+        .parse(data.extensions["titan:sources"]);
+      for (const [id, revision] of Object.entries(sources))
+        demand(
+          this.get(p, id).revision === revision,
+          409,
+          "A source changed. Prepare a fresh draft before publishing.",
+        );
+    }
+    demand(
       !(data.status === "completed" && data.kind === "work"),
       422,
       "Create work before accepting completion",
@@ -211,6 +446,194 @@ export class Domain {
         "Authoritative record requires review",
       );
     return this.writeUnit(p, u, undefined, "create", "Record authored");
+  }
+  composerDrafts(p: Principal): ComposerDraft[] {
+    human(p);
+    authorize(p, "read");
+    return (
+      this.index.db
+        .prepare(
+          "SELECT data FROM composer_drafts WHERE published_id IS NULL ORDER BY rowid DESC",
+        )
+        .all() as { data: string }[]
+    ).map((row) => JSON.parse(row.data));
+  }
+  private composerRow(id: string) {
+    z.string().uuid().parse(id);
+    return this.index.db
+      .prepare("SELECT data,published_id FROM composer_drafts WHERE id=?")
+      .get(id) as { data: string; published_id: string | null } | undefined;
+  }
+  saveComposerDraft(p: Principal, id: string, version: number, input: unknown) {
+    human(p);
+    authorize(p, "write");
+    z.number().int().nonnegative().parse(version);
+    const content = ComposerContentSchema.parse(input);
+    const row = this.composerRow(id);
+    const before = row ? (JSON.parse(row.data) as ComposerDraft) : null;
+    demand(
+      !row?.published_id,
+      409,
+      "This draft is already published. Edit the published page instead.",
+    );
+    demand(
+      (before?.version ?? 0) === version,
+      409,
+      "This draft changed in another window. Reopen it before saving.",
+    );
+    if (before)
+      demand(
+        JSON.stringify(before.source) === JSON.stringify(content.source),
+        422,
+        "A draft’s source cannot change",
+      );
+    if (content.source) {
+      const source = this.get(p, content.source.id, true);
+      demand(
+        source.kind === content.kind,
+        422,
+        "A page’s record type cannot change",
+      );
+      // Saving never overwrites the source. Preserve even a stale first draft;
+      // its source revision is checked when the owner publishes it.
+    }
+    const draft: ComposerDraft = {
+      ...content,
+      id,
+      version: version + 1,
+      updatedAt: now(),
+    };
+    this.index.db
+      .prepare(
+        "INSERT INTO composer_drafts(id,data) VALUES(?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+      )
+      .run(id, JSON.stringify(draft));
+    return draft;
+  }
+  discardComposerDraft(p: Principal, id: string, version: number) {
+    human(p);
+    authorize(p, "write");
+    const row = this.composerRow(id);
+    demand(row, 404, "Draft unavailable");
+    demand(
+      !row.published_id && JSON.parse(row.data).version === version,
+      409,
+      "This draft changed. Reopen it before discarding.",
+    );
+    this.index.db.prepare("DELETE FROM composer_drafts WHERE id=?").run(id);
+    return { ok: true };
+  }
+  rebaseComposerDraft(
+    p: Principal,
+    id: string,
+    version: number,
+    revision: string,
+  ) {
+    human(p);
+    authorize(p, "write");
+    const row = this.composerRow(id);
+    demand(row, 404, "Draft unavailable");
+    const draft = JSON.parse(row.data) as ComposerDraft;
+    demand(
+      !row.published_id && draft.version === version,
+      409,
+      "This draft changed. Reopen it before continuing.",
+    );
+    demand(draft.source, 422, "This draft does not revise a published page");
+    const source = this.get(p, draft.source.id);
+    demand(
+      source.revision === revision,
+      409,
+      "The published page changed again. Compare the latest version before continuing.",
+    );
+    const next = {
+      ...draft,
+      source: { id: source.id, revision },
+      version: version + 1,
+      updatedAt: now(),
+    };
+    this.index.db
+      .prepare("UPDATE composer_drafts SET data=? WHERE id=?")
+      .run(JSON.stringify(next), id);
+    return next;
+  }
+  publishComposerDraft(p: Principal, id: string, version: number) {
+    human(p);
+    authorize(p, "write");
+    const row = this.composerRow(id);
+    demand(row, 404, "Draft unavailable");
+    const draft = JSON.parse(row.data) as ComposerDraft;
+    demand(
+      draft.version === version,
+      409,
+      "This draft changed. Save and review the latest draft before publishing.",
+    );
+    if (row.published_id) return this.get(p, row.published_id);
+    demand(
+      draft.title.trim() && draft.body.trim(),
+      422,
+      "Add a title and some content before publishing.",
+    );
+    // The durable marker recovers publication if the process stops between the
+    // Git commit and the local draft receipt. New pages use the draft's stable ID.
+    const targetId = draft.source?.id ?? draft.id;
+    const before = this.records(p).find((u) => u.id === targetId);
+    const marker = { draftId: draft.id, version: draft.version };
+    let result: RecordView;
+    if (
+      before &&
+      JSON.stringify(before.extensions["titan:composer"]) ===
+        JSON.stringify(marker)
+    ) {
+      result = before;
+    } else if (draft.source) {
+      demand(
+        before,
+        404,
+        "This page is unavailable. Your draft has been kept.",
+      );
+      demand(
+        before.revision === draft.source.revision,
+        409,
+        "This page changed since you started editing. Your draft has been kept. Compare the latest page before publishing.",
+      );
+      result = this.edit(
+        p,
+        targetId,
+        draft.source.revision,
+        {
+          title: draft.title,
+          body: draft.body,
+          applicability: draft.applicability,
+          extensions: { ...before.extensions, "titan:composer": marker },
+        },
+        "Owner published a directly composed page",
+      ) as RecordView;
+    } else {
+      demand(!before, 409, "A page already uses this draft’s identity");
+      const unit = UnitSchema.parse({
+        id: draft.id,
+        schemaVersion: 1,
+        kind: draft.kind,
+        title: draft.title,
+        body: draft.body,
+        applicability: draft.applicability,
+        createdAt: now(),
+        updatedAt: now(),
+        extensions: { "titan:composer": marker },
+      });
+      result = this.writeUnit(
+        p,
+        unit,
+        undefined,
+        "create",
+        "Owner published a directly composed page",
+      );
+    }
+    this.index.db
+      .prepare("UPDATE composer_drafts SET published_id=? WHERE id=?")
+      .run(result.id, id);
+    return result;
   }
   private reviewMutation(
     p: Principal,
@@ -264,7 +687,9 @@ export class Domain {
       );
     this.commit(
       [{ path, content: encode(u) }],
-      this.event(p, operation, before ? [before] : [view], reason),
+      this.event(p, operation, before ? [before] : [view], reason, "applied", {
+        resultingRevisions: { [u.id]: revision },
+      }),
       jobs,
     );
     return view;
@@ -285,6 +710,20 @@ export class Domain {
       "Record changed; refresh before revising",
     );
     const data = EditUnit.parse(patch);
+    const source = before.extensions["titan:confluence"] as any;
+    demand(
+      !data.extensions ||
+        JSON.stringify(data.extensions["titan:confluence"]) ===
+          JSON.stringify(source),
+      422,
+      "Confluence provenance is managed by the connection",
+    );
+    demand(
+      source?.owner !== "confluence" ||
+        (data.title === undefined && data.body === undefined),
+      422,
+      "Save connected page content through a Confluence draft",
+    );
     const u = UnitSchema.parse({
       ...withoutRevision(before),
       ...data,
@@ -526,9 +965,16 @@ export class Domain {
     human(p);
     return {
       relationships: this.assertions(p).filter((a) => a.state === "proposed"),
-      mutations: this.objects<any>("reviews").filter(
-        (r) => r.state === "proposed",
-      ),
+      mutations: this.objects<any>("reviews").filter((r) => {
+        const visible = new Set(this.records(p, true).map((u) => u.id));
+        const sources = r.value?.extensions?.["titan:sources"] ?? {};
+        return (
+          r.state === "proposed" &&
+          [...Object.keys(r.revisions ?? {}), ...Object.keys(sources)].every(
+            (id) => visible.has(id),
+          )
+        );
+      }),
     };
   }
   review(p: Principal, id: string, accept: boolean) {
@@ -721,10 +1167,12 @@ export class Domain {
   }
   audit(p: Principal) {
     authorize(p, "read");
-    if (p.role === "human")
-      return this.objects<Event>("events").sort((a, b) =>
-        b.at.localeCompare(a.at),
-      );
+    if (p.role === "human") {
+      const visible = new Set(this.records(p, true).map((u) => u.id));
+      return this.objects<Event>("events")
+        .filter((e) => e.entities.every((id) => visible.has(id)))
+        .sort((a, b) => b.at.localeCompare(a.at));
+    }
     const visible = new Set(this.records(p).map((u) => u.id));
     return this.objects<Event>("events")
       .filter((e) => e.entities.every((id) => visible.has(id)))
@@ -738,6 +1186,7 @@ export class Domain {
         provider: SettingsSchema.shape.provider.optional(),
         model: z.string().min(1).max(120).optional(),
         credentialRef: SettingsSchema.shape.credentialRef.optional(),
+        providerBaseUrl: SettingsSchema.shape.providerBaseUrl.optional(),
         embeddingModel: z.string().max(120).optional(),
         webhookUrl: z.string().max(2000).optional(),
         relationshipTypes: SettingsSchema.shape.relationshipTypes.optional(),
@@ -772,6 +1221,13 @@ export class Domain {
       422,
       "Anthropic credential reference required",
     );
+    demand(
+      settings.provider !== "custom" ||
+        (settings.credentialRef === "CUSTOM_API_KEY" &&
+          !!settings.providerBaseUrl),
+      422,
+      "Add a custom API base URL and credential reference",
+    );
     this.commit(
       [{ path: ".titan/workspace.json", content: json(settings) }],
       this.event(p, "settings", [], "Owner updated deployment policy"),
@@ -797,7 +1253,9 @@ export class Domain {
         ids.add(a.source);
         ids.add(a.target);
       }
-    const result = this.records(p)
+    const assessmentRecords = this.records(p);
+    const assessmentLinks = this.assertions(p);
+    const result = assessmentRecords
       .filter(
         (u) =>
           ids.has(u.id) &&
@@ -807,8 +1265,22 @@ export class Domain {
       )
       .map((u) => ({
         ...u,
-        usableAsBasis: u.validity !== "superseded" && u.validity !== "disputed",
+        reliability: assessReliability(
+          u,
+          assessmentRecords,
+          assessmentLinks,
+          scope,
+        ),
+        usableAsBasis:
+          u.validity !== "superseded" &&
+          u.validity !== "disputed" &&
+          !(u.extensions["titan:confluence"] as any)?.issues?.length,
         warnings: [
+          ...((u.extensions["titan:confluence"] as any)?.issues?.length
+            ? [
+                "Confluence content is partially represented: review the original",
+              ]
+            : []),
           ...(u.validity === "superseded"
             ? ["Superseded: historical context only"]
             : []),

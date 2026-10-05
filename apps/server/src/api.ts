@@ -1,3 +1,5 @@
+import { IntegrationRegistry } from "./integrations.ts";
+import { confluenceManifest } from "../../shared/integrations/confluence.ts";
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import staticPlugin from "@fastify/static";
@@ -9,8 +11,11 @@ import { z, ZodError } from "zod";
 import { Domain, OWNER } from "./domain.ts";
 import { GitStorage } from "./storage.ts";
 import { Index } from "./index.ts";
+import { ConnectedStorage } from "./connected-storage.ts";
+import { Confluence, type ConfluenceOptions } from "./confluence.ts";
 import { Intelligence } from "./intelligence.ts";
 import {
+  ProviderBaseUrlSchema,
   Fault,
   demand,
   human,
@@ -29,16 +34,35 @@ export function createApp(options: {
   demo?: boolean;
   intelligenceUrl?: string;
   workers?: boolean;
+  confluence?: ConfluenceOptions;
 }) {
   const app = Fastify({ logger: false, bodyLimit: 2_000_000 });
   let domain: Domain;
   let intelligence: Intelligence;
+  let confluence: Confluence;
+  let connectedStorage: ConnectedStorage;
   const open = (root: string) => {
-    const storage = new GitStorage(root);
-    const state = join(options.stateDir, hash(storage.root).slice(0, 20));
+    const previousDomain = domain;
+    const previousStorage = connectedStorage;
+    const git = new GitStorage(root);
+    const state = join(options.stateDir, hash(git.root).slice(0, 20));
+    const storage = new ConnectedStorage(git, join(state, "connected.sqlite"));
     const next = new Domain(storage, new Index(join(state, "index.sqlite")));
+    connectedStorage = storage;
+    confluence = new Confluence(
+      next,
+      storage,
+      state,
+      options.confluence ?? {
+        clientId: process.env.TITAN_CONFLUENCE_CLIENT_ID,
+        clientSecret: process.env.TITAN_CONFLUENCE_CLIENT_SECRET,
+        redirectUri: process.env.TITAN_CONFLUENCE_REDIRECT_URI,
+      },
+    );
     domain = next;
     intelligence = new Intelligence(next, state, options.intelligenceUrl);
+    previousDomain?.index.close();
+    previousStorage?.close();
   };
   open(options.workspace);
   if (options.demo) seedDemo(domain!);
@@ -70,7 +94,12 @@ export function createApp(options: {
     });
   });
   app.addHook("preHandler", async (req) => {
-    if (req.url === "/health" || !req.url.startsWith("/api/")) return;
+    if (
+      req.url === "/health" ||
+      req.url.split("?")[0] === "/api/v1/integrations/confluence/callback" ||
+      !req.url.startsWith("/api/")
+    )
+      return;
     const bearer = req.headers.authorization?.replace(/^Bearer /, "");
     const cookie = req.headers.cookie
       ?.split("; ")
@@ -106,24 +135,142 @@ export function createApp(options: {
     );
     return { ok: true };
   });
+  const integrations = new IntegrationRegistry();
+  integrations.register({
+    manifest: confluenceManifest,
+    status: () => ({
+      ...confluence!.status(),
+      accountLabel: confluence!.status().site?.name,
+    }),
+    authorize: (values) => confluence!.begin(values.allowEdits === true),
+    configure: (values) => confluence!.configure(values),
+    sync: () => confluence!.schedule(),
+    disconnect: () => confluence!.disconnect(),
+    choices: {
+      "/sites": () => confluence!.sites(),
+      "/spaces": (query) =>
+        confluence!.spaces(z.string().min(1).parse(query.siteId)),
+    },
+  });
+  app.get("/api/v1/integrations", (req) => {
+    human(p(req));
+    return integrations.catalog();
+  });
+  app.get("/api/v1/integrations/:integrationId/manifest", (req) => {
+    human(p(req));
+    const manifest = integrations.manifest((req.params as any).integrationId);
+    demand(manifest, 404, "This integration isn’t available.");
+    return manifest;
+  });
+  const integrationId = (req: any) => String(req.params.integrationId);
+  app.get("/api/v1/integrations/:integrationId", (req) => {
+    human(p(req));
+    return integrations.get(integrationId(req)).status();
+  });
+  app.post("/api/v1/integrations/:integrationId/authorize", (req) => {
+    human(p(req));
+    return integrations.authorize(integrationId(req), req.body);
+  });
+  app.put("/api/v1/integrations/:integrationId", (req) => {
+    human(p(req));
+    return integrations.configure(integrationId(req), req.body);
+  });
+  app.post("/api/v1/integrations/:integrationId/sync", (req) => {
+    human(p(req));
+    const plugin = integrations.get(integrationId(req));
+    demand(plugin.sync, 422, "This integration doesn’t support syncing.");
+    return plugin.sync();
+  });
+  app.delete("/api/v1/integrations/:integrationId", (req) => {
+    human(p(req));
+    return integrations.get(integrationId(req)).disconnect();
+  });
+  app.get("/api/v1/integrations/:integrationId/:source", (req) => {
+    human(p(req));
+    return integrations.choices(
+      integrationId(req),
+      (req.params as any).source,
+      z.record(z.string(), z.string()).parse(req.query),
+    );
+  });
+  const connection = "/api/v1/integrations/confluence";
+  app.get(connection + "/callback", async (req, reply) => {
+    const query = z
+      .object({
+        state: z.string().min(1),
+        code: z.string().optional(),
+        error: z.string().optional(),
+      })
+      .parse(req.query);
+    try {
+      await confluence!.callback(query.state, query.code, !!query.error);
+    } catch {
+      return reply.redirect(
+        (process.env.TITAN_WEB_ORIGIN ?? "http://127.0.0.1:5173") +
+          "/?confluence=error",
+      );
+    }
+    return reply.redirect(
+      (process.env.TITAN_WEB_ORIGIN ?? "http://127.0.0.1:5173") +
+        "/?confluence=connected",
+    );
+  });
+  app.post("/api/v1/units/:id/confluence/refresh", async (req) => {
+    human(p(req));
+    return confluence!.refreshPage(
+      z
+        .string()
+        .uuid()
+        .parse((req.params as any).id),
+    );
+  });
+  app.get("/api/v1/units/:id/confluence/source", (req) => {
+    human(p(req));
+    return confluence!.sourceStatus(
+      z
+        .string()
+        .uuid()
+        .parse((req.params as any).id),
+    );
+  });
+  app.get("/api/v1/units/:id/confluence/migration", (req) => {
+    human(p(req));
+    return confluence!.previewMigration(
+      z
+        .string()
+        .uuid()
+        .parse((req.params as any).id),
+    );
+  });
+  app.post("/api/v1/units/:id/confluence/migration", async (req) => {
+    human(p(req));
+    return confluence!.migrate(
+      z
+        .string()
+        .uuid()
+        .parse((req.params as any).id),
+      z
+        .object({ revision: z.string().min(1) })
+        .strict()
+        .parse(req.body).revision,
+    );
+  });
   app.get("/api/v1/workspace", (req) => {
     human(p(req));
     return {
       root: domain!.storage.root,
+      confluence: confluence!.status(),
       settings: domain!.settings(),
       issues: domain!.issues,
       jobs: domain!.index.jobs(),
-      credentials: {
-        openai: !!process.env.OPENAI_API_KEY,
-        anthropic: !!process.env.ANTHROPIC_API_KEY,
-      },
+      credentials: intelligence!.credentialStatus(),
       models: domain!.objects("models"),
     };
   });
   app.post("/api/v1/workspace", async (req) => {
     human(p(req));
     demand(
-      !intelligence!.busy,
+      !intelligence!.busy && !confluence!.busy,
       409,
       "Wait for the active background operation before switching workspaces",
     );
@@ -151,10 +298,46 @@ export function createApp(options: {
         });
     }
     demand(root, 422, "Provide a local path or GitHub URL");
-    const previous = domain!;
     open(root);
-    previous.index.close();
     return { root: domain!.storage.root };
+  });
+  app.put("/api/v1/intelligence/credentials", (req) => {
+    human(p(req));
+    const input = z
+      .object({
+        provider: z.enum(["openai", "anthropic", "custom"]),
+        apiKey: z
+          .string()
+          .trim()
+          .max(1000)
+          .refine(
+            (key) => !/\s/.test(key),
+            "API key cannot contain whitespace",
+          ),
+      })
+      .strict()
+      .parse(req.body);
+    return intelligence!.saveCredential(input.provider, input.apiKey);
+  });
+  app.post("/api/v1/intelligence/test", async (req) => {
+    human(p(req));
+    const input = z
+      .object({
+        provider: z.enum(["openai", "anthropic", "custom"]),
+        model: z.string().trim().min(1).max(120),
+        providerBaseUrl: ProviderBaseUrlSchema,
+      })
+      .strict()
+      .parse(req.body);
+    return intelligence!.testConnection({
+      ...input,
+      credentialRef:
+        input.provider === "openai"
+          ? "OPENAI_API_KEY"
+          : input.provider === "anthropic"
+            ? "ANTHROPIC_API_KEY"
+            : "CUSTOM_API_KEY",
+    });
   });
   app.patch("/api/v1/settings", (req) =>
     domain!.updateSettings(p(req), req.body),
@@ -172,6 +355,78 @@ export function createApp(options: {
     domain!.records(p(req), (req.query as any).removed === "true"),
   );
   app.post("/api/v1/units", (req) => domain!.create(p(req), req.body));
+  app.get("/api/v1/places", (req) => domain!.places(p(req)));
+  app.post("/api/v1/places", (req) => domain!.savePlace(p(req), req.body));
+  app.put("/api/v1/places/:id", (req) => {
+    const body = z
+      .object({ revision: z.string().min(1), content: z.unknown() })
+      .strict()
+      .parse(req.body);
+    return domain!.savePlace(
+      p(req),
+      body.content,
+      (req.params as any).id,
+      body.revision,
+    );
+  });
+  app.get("/api/v1/composer-drafts", (req) => domain!.composerDrafts(p(req)));
+  app.put("/api/v1/composer-drafts/:id", (req) => {
+    const body = z
+      .object({ version: z.number().int().nonnegative(), content: z.unknown() })
+      .strict()
+      .parse(req.body);
+    return domain!.saveComposerDraft(
+      p(req),
+      (req.params as any).id,
+      body.version,
+      body.content,
+    );
+  });
+  app.post("/api/v1/composer-drafts/:id/publish", async (req) => {
+    const body = z
+      .object({ version: z.number().int().positive() })
+      .strict()
+      .parse(req.body);
+    const draft = domain!
+      .composerDrafts(p(req))
+      .find((d) => d.id === (req.params as any).id);
+    const record = draft?.source
+      ? domain!.get(p(req), draft.source.id)
+      : undefined;
+    if ((record?.extensions["titan:confluence"] as any)?.owner === "confluence")
+      return confluence!.publishDraft((req.params as any).id, body.version);
+    return domain!.publishComposerDraft(
+      p(req),
+      (req.params as any).id,
+      body.version,
+    );
+  });
+  app.post("/api/v1/composer-drafts/:id/rebase", (req) => {
+    const body = z
+      .object({
+        version: z.number().int().positive(),
+        revision: z.string().min(1),
+      })
+      .strict()
+      .parse(req.body);
+    return domain!.rebaseComposerDraft(
+      p(req),
+      (req.params as any).id,
+      body.version,
+      body.revision,
+    );
+  });
+  app.delete("/api/v1/composer-drafts/:id", (req) => {
+    const body = z
+      .object({ version: z.number().int().positive() })
+      .strict()
+      .parse(req.body);
+    return domain!.discardComposerDraft(
+      p(req),
+      (req.params as any).id,
+      body.version,
+    );
+  });
   app.get("/api/v1/units/:id", (req) =>
     domain!.get(
       p(req),
@@ -179,6 +434,17 @@ export function createApp(options: {
       (req.query as any).removed === "true",
     ),
   );
+  app.get("/api/v1/units/:id/reliability", (req) => {
+    const query = z
+      .object({ scope: z.string().max(120).optional() })
+      .strict()
+      .parse(req.query);
+    return domain!.reliability(
+      p(req),
+      (req.params as any).id,
+      query.scope ? [query.scope] : [],
+    );
+  });
   app.patch("/api/v1/units/:id", (req) => {
     const body = z
       .object({
@@ -255,6 +521,7 @@ export function createApp(options: {
         id: z.string().uuid().optional(),
         revision: z.string().optional(),
         selection: z.string().max(12000).optional(),
+        placeId: z.string().uuid().optional(),
       })
       .strict()
       .parse(req.body);
@@ -292,7 +559,29 @@ export function createApp(options: {
         },
         source: { id: record.id, revision: record.revision },
       };
-    const result = await intelligence!.author({ ...b, record });
+    const place = b.placeId
+      ? domain!.places(p(req)).find((place) => place.id === b.placeId)
+      : undefined;
+    if (b.placeId) demand(place, 404, "This place is unavailable");
+    const sources =
+      place && !record
+        ? domain!.records(p(req)).filter((u) => place.memberIds.includes(u.id))
+        : [];
+    demand(
+      sources.reduce((total, u) => total + u.body.length, 0) <= 100_000,
+      422,
+      "This place has too much content for one draft. Choose a smaller set of records.",
+    );
+    const sourceRevisions = Object.fromEntries(
+      sources.map((u) => [u.id, u.revision]),
+    );
+    const result = await intelligence!.author({ ...b, record, sources });
+    for (const [id, revision] of Object.entries(sourceRevisions))
+      demand(
+        domain!.get(p(req), id).revision === revision,
+        409,
+        "A source changed during authoring. Prepare a fresh draft.",
+      );
     if (record)
       demand(
         domain!.get(p(req), record.id).revision === record.revision,
@@ -302,6 +591,9 @@ export function createApp(options: {
     return {
       draft: result,
       source: record ? { id: record.id, revision: record.revision } : null,
+      ...(sources.length
+        ? { sources: sourceRevisions, placeId: place!.id }
+        : {}),
     };
   });
   app.post("/api/v1/tokens", (req) => {
@@ -338,18 +630,23 @@ export function createApp(options: {
       ? undefined
       : setInterval(() => {
           void intelligence!.tick().catch(() => {});
+          void confluence!.tick().catch(() => {});
         }, 750);
   timer?.unref();
   app.addHook("onClose", async () => {
     if (timer) clearInterval(timer);
-    while (intelligence!.busy)
+    while (intelligence!.busy || confluence!.busy)
       await new Promise((resolve) => setTimeout(resolve, 20));
     domain!.index.close();
+    connectedStorage!.close();
   });
   return {
     app,
     get domain() {
       return domain!;
+    },
+    get confluence() {
+      return confluence!;
     },
     get intelligence() {
       return intelligence!;

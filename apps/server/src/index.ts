@@ -15,6 +15,7 @@ export class Index {
  CREATE TABLE IF NOT EXISTS tokens(hash TEXT PRIMARY KEY,id TEXT,scopes TEXT);
  CREATE TABLE IF NOT EXISTS observed(path TEXT PRIMARY KEY,revision TEXT);
  CREATE TABLE IF NOT EXISTS outcomes(key TEXT PRIMARY KEY,result TEXT);
+ CREATE TABLE IF NOT EXISTS composer_drafts(id TEXT PRIMARY KEY,data TEXT NOT NULL,published_id TEXT);
  `);
     this.db.exec("UPDATE jobs SET status='pending' WHERE status='running'");
   }

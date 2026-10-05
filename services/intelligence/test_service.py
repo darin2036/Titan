@@ -38,6 +38,14 @@ class IntelligenceTests(unittest.TestCase):
     def test_targeted_edit_preserves_surroundings(self):
         result=service.author({'config':{'provider':'fixture'},'record':record(body='before target after'),'selection':'target','instruction':'replacement'})
         self.assertEqual(result['body'],'before replacement after')
+    def test_place_outline_is_source_based_and_removed_sources_are_rejected(self):
+        source=record('11111111-1111-4111-8111-111111111111',body='A team chooses its first project.')
+        result=service.author({'config':{'provider':'fixture'},'instruction':'Onboarding overview','sources':[source]})
+        self.assertIn(source['body'],result['body'])
+        self.assertIn('#unit-'+source['id'],result['body'])
+        self.assertIn('Demonstration draft',result['body'])
+        with self.assertRaises(service.Invalid):
+            service.author({'config':{'provider':'fixture'},'sources':[record(lifecycle='removed')]})
     def test_safety_evaluation_and_ranking(self):
         self.assertTrue(service.evaluate({})['evaluation']['passed'])
         result=service.rank({'query':'identity','records':[record('removed',lifecycle='removed'),record('old',validity='superseded'),record('current')]})
@@ -48,3 +56,37 @@ class IntelligenceTests(unittest.TestCase):
         with self.assertRaises(service.Invalid):service.embed({'records':[record(lifecycle='removed')],'model':'test'})
 
 if __name__=='__main__':unittest.main()
+
+class SavedCredentialTests(unittest.TestCase):
+    def test_saved_key_is_used_for_generation_and_embeddings(self):
+        from unittest.mock import patch
+        import service
+        config = {'provider': 'openai', 'credentialRef': 'OPENAI_API_KEY', 'model': 'test-model'}
+        with patch.object(service, 'request_json', return_value={'output': []}) as request:
+            service.generate(config, 'hello', {'OPENAI_API_KEY': 'saved-test-key'})
+            self.assertEqual(request.call_args.args[1]['Authorization'], 'Bearer saved-test-key')
+        with patch.object(service, 'request_json', return_value={'data': []}) as request:
+            service.embed({'model': 'test-embedding', 'records': [], 'credentials': {'OPENAI_API_KEY': 'saved-test-key'}})
+            self.assertEqual(request.call_args.args[1]['Authorization'], 'Bearer saved-test-key')
+
+class CustomProviderTests(unittest.TestCase):
+    def test_custom_chat_completions(self):
+        config = {'provider': 'custom', 'credentialRef': 'CUSTOM_API_KEY', 'model': 'local-model', 'providerBaseUrl': 'http://localhost:1234/v1/'}
+        with patch.object(service, 'request_json', return_value={'choices': [{'message': {'content': 'OK'}}]}) as request:
+            self.assertEqual(service.generate(config, 'hello', {'CUSTOM_API_KEY': 'custom-test'}), 'OK')
+            self.assertEqual(request.call_args.args[0], 'http://localhost:1234/v1/chat/completions')
+            self.assertEqual(request.call_args.args[1]['Authorization'], 'Bearer custom-test')
+            self.assertEqual(request.call_args.args[2]['model'], 'local-model')
+        with patch.dict(service.os.environ, {}, clear=True), patch.object(service, 'request_json', return_value={'choices': [{'message': {'content': 'OK'}}]}) as request:
+            service.generate(config, 'hello')
+            self.assertEqual(request.call_args.args[1], {})
+        for url in ['http://remote.example/v1', 'https://user:secret@example.com/v1', 'https://example.com/v1?key=secret', '']:
+            with self.assertRaises(service.Invalid):
+                service.generate({**config, 'providerBaseUrl': url}, 'hello')
+
+    def test_claude_uses_its_own_key_and_protocol(self):
+        config = {'provider': 'anthropic', 'credentialRef': 'ANTHROPIC_API_KEY', 'model': 'claude-test'}
+        with patch.object(service, 'request_json', return_value={'content': [{'type': 'text', 'text': 'OK'}]}) as request:
+            self.assertEqual(service.generate(config, 'hello', {'ANTHROPIC_API_KEY': 'claude-secret', 'OPENAI_API_KEY': 'unrelated'}), 'OK')
+            self.assertEqual(request.call_args.args[0], 'https://api.anthropic.com/v1/messages')
+            self.assertEqual(request.call_args.args[1]['x-api-key'], 'claude-secret')

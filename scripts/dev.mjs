@@ -43,6 +43,7 @@ function start(command, args) {
 start(process.env.PYTHON ?? "python3", ["services/intelligence/service.py"]);
 start(process.execPath, [
   "node_modules/tsx/dist/cli.mjs",
+  "watch",
   "apps/server/src/main.ts",
 ]);
 start(process.execPath, [

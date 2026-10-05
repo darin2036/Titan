@@ -58,10 +58,11 @@ Titan sounds like a thoughtful collaborator: warm, grounded, concise, and useful
 - Use `you` for a human action and `Titan` or `the agent` for an automated action.
 - Use contractions where they make the sentence warmer: “couldn’t,” “you’re,” and “we’ll.” Do not force them into formal or high-stakes warnings.
 - Keep helper text to one or two sentences. If instructions need steps, use a short ordered list.
+- Default to minimal copy. Omit page subtitles, slogans, branded footers, and hints that repeat a label or visible action. Keep instructions only when they clarify an unfamiliar interaction or a consequence; put optional setup explanations behind a disclosure.
 
 ## Visual direction
 
-Titan should feel like an approachable notebook: light, spacious, familiar, and easy to start using. Borrow the useful cues from Notion’s page-oriented workspace: quiet navigation, clear page titles, neutral surfaces, simple rows, and details revealed when needed. Titan’s own identity comes through in its helpful voice, restrained green accent, and visible connections between ideas.
+Titan should feel like an approachable notebook: light, spacious, familiar, and easy to start using. Borrow the useful cues from Notion’s page-oriented workspace: quiet navigation, clear page titles, neutral surfaces, simple rows, and details revealed when needed. Titan’s own identity comes through in its helpful voice, restrained deep iris accent with champagne warmth, and visible connections between ideas.
 
 Reference: [Notion’s sidebar navigation](https://www.notion.com/help/navigate-with-the-sidebar). Apply the principles to Titan’s existing workflows rather than introducing unfamiliar features or duplicating another product’s branding.
 
@@ -69,31 +70,46 @@ Reference: [Notion’s sidebar navigation](https://www.notion.com/help/navigate-
 
 Use the shared CSS tokens in `apps/web/src/style.css` as the implementation source of truth. Neutral surfaces should occupy most of the interface.
 
-| Role          | Token or value        | Use                                                   |
-| ------------- | --------------------- | ----------------------------------------------------- |
-| Warm ink      | `#37352f`             | Headings and primary text                             |
-| Titan green   | `--green: #28785d`    | Primary actions, focus rings, and small brand accents |
-| Warm surface  | `--surface: #f7f7f5`  | Sidebar and quiet supporting areas                    |
-| Panel white   | `#ffffff`             | Records, forms, and review surfaces                   |
-| Soft green    | `#e6eee8`             | Brand mark and agent icon                             |
-| Soft border   | `--border: #e9e8e4`   | Essential boundaries                                  |
-| Hover surface | `--hover: #efefec`    | Hovered and selected rows                             |
-| Muted ink     | `--muted: #73716c`    | Secondary metadata and supporting copy                |
-| Review amber  | `#fbefde` / `#865b29` | Superseded or disputed content                        |
+| Role             | Token and default                                                           | Use                                                                                     |
+| ---------------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------------- |
+| Deep iris        | `--brand: #5b368c`                                                          | Primary actions, links, focus rings, and small brand accents                            |
+| Deep iris hover  | `--brand-hover: #48296f`                                                    | Hovered primary actions                                                                 |
+| On-brand text    | `--on-brand: #ffffff`                                                       | Text and icons on solid primary actions                                                 |
+| Soft iris        | `--brand-soft: #eee7f5`                                                     | Brand mark, agent icon, and active navigation                                           |
+| Warm charcoal    | `--ink: #302a38`                                                            | Headings and primary text                                                               |
+| Secondary ink    | `--ink-secondary: #544b5d`                                                  | Supporting body copy and neutral controls                                               |
+| Muted ink        | `--muted: #6e6576`                                                          | Secondary metadata and supporting copy                                                  |
+| Quiet surface    | `--surface: #f7f5f9`                                                        | Sidebar and quiet supporting areas                                                      |
+| Panel white      | `--panel: #ffffff`                                                          | Records, forms, and review surfaces                                                     |
+| Soft border      | `--border: #e8e3ec`                                                         | Essential boundaries                                                                    |
+| Strong border    | `--border-strong: #d7cfdf`                                                  | Controls and hovered boundaries                                                         |
+| Hover surface    | `--hover: #f0edf4`                                                          | Hovered neutral controls and rows                                                       |
+| Antique gold     | `--complement: #b08a32`                                                     | Sparse decorative brand accents; never body text, primary actions, or status indicators |
+| Champagne        | `--complement-soft: #f3ebd5`                                                | Quiet contextual highlights with charcoal or deep iris text                             |
+| Current state    | `--status-current: #6e6576`                                                 | Neutral current-record indicators, paired with a status label                           |
+| Review amber     | `--review: #865b29` / `--review-soft: #fbefde` / `--review-border: #efe3ce` | Superseded, disputed, or review-worthy content                                          |
+| Error terracotta | `--error: #9b4d30` / `--error-soft: #fff0ea` / `--error-border: #efd4c5`    | Errors and recovery messages                                                            |
 
-Do not introduce saturated gradients, neon accents, or a second dominant brand color. Reserve amber for states that require attention. Color must not be the only way a state is communicated.
+The default palette is **Deep iris + champagne + warm charcoal**, with antique gold used sparingly. This deliberately replaces the earlier green brand direction. White and quiet neutral surfaces should remain dominant; purple provides identity through actions, focus, links, and small marks. Champagne adds warmth to contextual highlights without becoming a second dominant color. Do not introduce saturated gradients or neon accents. Reserve amber for states that require attention, and keep gold out of warning badges. Color must not be the only way a state is communicated.
+
+Use semantic CSS roles rather than hue names or component-specific hex values. Future admin palette settings should override the brand and companion roles as a validated set, including hover, soft fills, and on-brand text. Keep review, error, and current-state roles independent of admin branding. Admin customization is planned; these tokens establish the contract without adding settings now.
+
+Maintain at least 4.5:1 contrast for normal text and 3:1 for meaningful control boundaries and focus indicators against their adjacent surface. The default deep iris and white pairing is 8.9:1; muted ink on the quiet surface is 5.1:1. Antique gold is decorative and is not approved for small text on white.
 
 ### Typography
 
 - Use the native system sans-serif stack for headings, body text, and controls. The interface should feel familiar and render consistently without remote font downloads.
 - Use 32px page titles, 28px record titles, 15px document text, 14px controls and helper copy, and 12px supporting metadata.
 - Controls share `--control-size`, `--control-line`, and `--control-weight`; metadata shares `--meta-size`. Equivalent controls keep the same size even in the agent panel or mobile navigation.
+- Breadcrumbs use the shared control typography for every segment, including the current page. Align segments and separators in one centered flex row with a 6px gap; do not mix inline button alignment with text baselines. Keep separators visible, truncate long segments within the available width, and retain visible keyboard focus on navigation buttons.
 - Headings have gently compact letter spacing and strong hierarchy. Body copy uses a relaxed line-height and readable contrast.
 - Favor short headings. Use supporting text to explain nuance.
 
 ### Layout and spacing
 
 - Make the document feel like a page, with quiet navigation beside it and room to read.
+- When a document is open, its title is the primary heading. Keep category or place names in navigation and breadcrumbs; do not repeat them as a headline above the document. Put compact, factual signals beneath the title: record type, validity, update time, and revision-bound editor attribution when available. Label drafts as unpublished. Future classification or compliance labels need structured policy data and provenance; do not infer them from a title, recency, or knowledge validity.
+- Keep one compact action row beside the breadcrumb. Actions follow the workflow: creation while browsing, editing while reading, and publish/close while writing. Put secondary page actions in an overflow menu; do not stack a creation toolbar above a draft toolbar.
 - Use simple rows, fine separators, and restrained 5–8px corner radii. Keep the page canvas open; avoid enclosing every section in a card.
 - Preserve the working rhythm: browse context, inspect the record, collaborate with the agent. Let people hide the agent panel when reading.
 - Keep spacing compact and consistent. Use small gaps within related controls, moderate gaps between sections, and generous space only around the main page title or an empty state.
@@ -110,7 +126,7 @@ Do not introduce saturated gradients, neon accents, or a second dominant brand c
 
 ### Primary actions
 
-Use a solid Titan-green button for the single most important next step in a region. Pair it with a specific verb. A secondary action should be neutral and visually quieter.
+Use a solid deep iris button with `--on-brand` text for the single most important next step in a region. Pair it with a specific verb. A secondary action should be neutral and visually quieter.
 
 Do not place several equally weighted primary buttons together. If a choice has meaningful consequences, explain the distinction next to the actions.
 
@@ -153,7 +169,7 @@ Before shipping a Titan UI or copy change, check the following:
 - Does the copy sound friendly, direct, and useful?
 - Does it explain the next action or current state without unnecessary jargon?
 - Does it preserve human review for consequential changes?
-- Does the visual treatment use warm neutrals, readable ink, a small green accent, and purposeful amber states?
+- Does the visual treatment use warm neutrals, readable ink, a small deep iris accent and restrained champagne warmth, and purposeful amber states?
 - Are controls at the shared 14px baseline and supporting metadata at 12px?
 - Can people focus on a record and reveal supporting details when they need them?
 - Is there one clear primary action in the relevant region?

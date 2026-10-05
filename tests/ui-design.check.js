@@ -1,4 +1,4 @@
-// Run through playwright-cli run-code --filename tests/ui-design.check.js.
+// Run: playwright-cli run-code "$(sed '$s/;$//' tests/ui-design.check.js)"
 // Requires an authenticated local demo session with at least one knowledge record.
 // Prepares and discards a draft without applying changes.
 // Create output/playwright before running; screenshots are saved there.
@@ -6,7 +6,11 @@ async (page) => {
   const fail = (message) => {
     throw new Error(message);
   };
-  await page.getByRole("button", { name: /◈ Knowledge/ }).click();
+  await page.getByRole("button", { name: "Expand record types" }).click();
+  await page
+    .getByRole("navigation", { name: "Browse workspace", exact: true })
+    .getByRole("button", { name: /◈ Knowledge/ })
+    .click();
   await page.locator(".record-card").first().click();
   await page.getByText("Record details", { exact: true }).click();
   const details = page.locator(".record-details");
@@ -19,9 +23,11 @@ async (page) => {
     .click();
   if (await page.locator("#workspace-agent").isVisible())
     fail("Agent did not hide");
-  await page.getByRole("button", { name: /New record/ }).click();
+  await page
+    .getByRole("button", { name: "Draft with agent", exact: true })
+    .click();
   if (!(await page.locator("#workspace-agent").isVisible()))
-    fail("New record did not reopen agent");
+    fail("Draft with agent did not reopen agent");
   await page.waitForFunction(
     () =>
       document.activeElement === document.querySelector(".composer textarea"),
@@ -50,6 +56,21 @@ async (page) => {
     [390, 844],
   ]) {
     await page.setViewportSize({ width, height });
+    await page.waitForFunction(
+      ({ width, height }) => {
+        const panel = document
+          .querySelector("#workspace-agent")
+          ?.getBoundingClientRect();
+        return (
+          panel &&
+          panel.left >= 0 &&
+          panel.top >= 0 &&
+          panel.right <= width &&
+          panel.bottom <= height
+        );
+      },
+      { width, height },
+    );
     if (
       await page.evaluate(
         () => document.documentElement.scrollWidth > innerWidth,
@@ -74,6 +95,14 @@ async (page) => {
       );
     if (sizes.some((size) => size !== "14px"))
       fail("Control typography changes at " + width);
+    if (width <= 760) {
+      await page
+        .getByRole("button", { name: "Minimize agent", exact: true })
+        .click();
+      await page
+        .getByRole("button", { name: "Navigation", exact: true })
+        .click();
+    }
     if (
       !(await page
         .getByRole("button", { name: "⚙ Settings", exact: true })
@@ -85,6 +114,8 @@ async (page) => {
       fullPage: true,
     });
   }
-  await page.getByRole("button", { name: "Discard", exact: true }).click();
   await page.setViewportSize({ width: 1440, height: 1000 });
+  if (!(await page.locator("#workspace-agent").isVisible()))
+    await page.getByRole("button", { name: "Open agent", exact: true }).click();
+  await page.getByRole("button", { name: "Discard", exact: true }).click();
 };

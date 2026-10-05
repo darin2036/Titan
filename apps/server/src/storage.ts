@@ -93,6 +93,7 @@ export class GitStorage implements StorageAdapter {
       provider: "fixture",
       model: "fixture-v1",
       credentialRef: "OPENAI_API_KEY",
+      providerBaseUrl: "",
       embeddingModel: "",
       activeModel: "baseline-v1",
       previousModel: null,

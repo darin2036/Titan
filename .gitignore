@@ -1,0 +1,19 @@
+node_modules/
+dist/
+.local/
+.env
+__pycache__/
+*.pyc
+.venv/
+work/
+.playwright-cli/
+output/playwright/
+
+outputs/
+
+# Local credentials and personal runtime state
+.env.*
+!.env.example
+*.pem
+*.key
+.DS_Store

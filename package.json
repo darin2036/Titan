@@ -1,0 +1,53 @@
+{
+  "name": "titan",
+  "version": "0.1.0",
+  "description": "Agent-first knowledge and work, with deployment-local intelligence.",
+  "scripts": {
+    "dev": "node scripts/dev.mjs",
+    "demo": "node scripts/dev.mjs --demo",
+    "server": "tsx apps/server/src/main.ts",
+    "web": "vite --config apps/web/vite.config.ts",
+    "build": "tsc --noEmit && vite build --config apps/web/vite.config.ts",
+    "test": "tsx --test tests/*.test.ts && python3 -m unittest discover -s services/intelligence -p 'test_*.py'",
+    "check": "npm run build && npm test",
+    "mcp": "tsx apps/server/src/mcp.ts",
+    "format": "prettier --write apps scripts tests README.md package.json tsconfig.json",
+    "format:check": "prettier --check apps scripts tests README.md package.json tsconfig.json"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "SEE LICENSE IN LICENSE",
+  "type": "module",
+  "dependencies": {
+    "@fastify/cors": "^11.3.0",
+    "@fastify/static": "^10.1.5",
+    "@modelcontextprotocol/sdk": "^1.32.1",
+    "fastify": "^5.12.5",
+    "react": "^19.3.0",
+    "react-dom": "^19.3.0",
+    "react-markdown": "^10.1.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.4",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "@vitejs/plugin-react": "^6.1.2",
+    "prettier": "^3.9.9",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vite": "^8.3.2"
+  },
+  "private": true,
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/darin2036/Titan.git"
+  },
+  "bugs": {
+    "url": "https://github.com/darin2036/Titan/issues"
+  },
+  "homepage": "https://github.com/darin2036/Titan#readme"
+}

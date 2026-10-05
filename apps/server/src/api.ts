@@ -354,6 +354,7 @@ export function createApp(options: {
   app.get("/api/v1/units", (req) =>
     domain!.records(p(req), (req.query as any).removed === "true"),
   );
+  app.get("/api/v1/documents", (req) => domain!.documentFiles(p(req)));
   app.post("/api/v1/units", (req) => domain!.create(p(req), req.body));
   app.get("/api/v1/places", (req) => domain!.places(p(req)));
   app.post("/api/v1/places", (req) => domain!.savePlace(p(req), req.body));

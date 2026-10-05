@@ -3,7 +3,7 @@
 **Shared knowledge and work, built around agents.**
 
 [![Checks](https://github.com/darin2036/Titan/actions/workflows/check.yml/badge.svg)](https://github.com/darin2036/Titan/actions/workflows/check.yml)
-[![License: source-available](https://img.shields.io/badge/license-source--available-28785d)](#license)
+[![License: source-available](https://img.shields.io/badge/license-source--available-5b368c)](#license)
 
 Titan brings the core of a knowledge base and a work tracker into one local workspace. Agents author records, connect ideas to work and evidence, and propose changes. People think with the agent, review consequential decisions, and inspect the history behind the system's understanding.
 
@@ -11,9 +11,17 @@ Native records are Markdown in Git. Connected Confluence pages stay in a private
 
 **Status:** early proof of concept, built for a single owner running locally. You can explore the complete demo without API keys or paid model calls. This is not yet a hosted service or a production multi-user application.
 
-![Titan's document workspace with a movable agent panel and highlighted text attached to chat](docs/images/titan-workspace.png)
+![Titan’s current document workspace with places navigation, record provenance, and agent access](docs/images/titan-workspace.png)
 
-[Quick start](#quick-start) · [How it works](#how-it-works) · [Agent integration](#connect-your-agents) · [Technical reference](docs/technical-reference.md) · [Contributing](CONTRIBUTING.md) · [License](#license)
+[Quick start](#quick-start) · [Model setup](#bring-your-own-model) · [How it works](#how-it-works) · [Agent integration](#connect-your-agents) · [Technical reference](docs/technical-reference.md) · [Contributing](CONTRIBUTING.md) · [License](#license)
+
+## What you can do today
+
+- Organize knowledge, decisions, work, and evidence into places for teams and projects.
+- Write with the rich editor or draft with an agent. Private drafts autosave until you publish.
+- Connect Confluence pages, inspect their sources, and refresh or write back with revision checks.
+- Configure OpenAI, Claude, or a custom OpenAI-compatible endpoint directly in Settings.
+- Inspect record provenance, reliability signals, proposed connections, and revision history.
 
 ## Why Titan
 
@@ -115,7 +123,15 @@ Implementation being finished is separate from accepted completion. An agent say
 
 ## Bring your own model
 
-Titan supports OpenAI, Claude (Anthropic), and custom OpenAI-compatible providers through the same controlled intelligence pipeline. The form shows the selected provider’s model and credential fields. Custom connections also ask for an API base URL (including `/v1` when required) and use Chat Completions; authentication is optional for local servers. Remote endpoints require HTTPS, and provider redirects are rejected to keep credentials on the chosen endpoint. In **Settings → Intelligence & autonomy**, choose your provider, enter a model ID and API key, then use **Test connection** and **Save operating policy**. Testing makes a small billable model request. Saved keys are kept in private server state with owner-only file permissions; `TITAN_STATE_DIR` must be outside the knowledge repository. You can replace or remove a saved key here.
+Titan supports OpenAI, Claude (Anthropic), and custom OpenAI-compatible providers through the same controlled intelligence pipeline. The form adapts to the selected provider’s model and credential fields. Custom connections also ask for an API base URL (including `/v1` when required) and use Chat Completions; authentication is optional for local servers. Remote endpoints require HTTPS, and provider redirects are rejected to keep credentials on the chosen endpoint. In **Settings → Intelligence & autonomy**, choose your provider, enter a model ID and API key, then use **Test connection** and **Save operating policy**. Testing makes a small billable model request. Saved keys are kept in private server state with owner-only file permissions; `TITAN_STATE_DIR` must be outside the knowledge repository. You can replace or remove a saved key here.
+
+![Titan intelligence settings showing custom provider endpoint, model, optional API key, and connection testing](docs/images/titan-intelligence-settings.png)
+
+1. Choose **OpenAI**, **Claude (Anthropic)**, or **Custom (OpenAI-compatible)**.
+2. Enter the model ID and API key. For a custom provider, also enter its API base URL; local endpoints can omit the key if authentication is disabled.
+3. Select **Test connection**, then **Save operating policy**. Saving the policy also saves any key you entered.
+
+Search embeddings are optional and use a separate OpenAI model and key, even when another provider handles authoring. Restart the launcher after updating Titan so the Python intelligence service loads the latest changes.
 
 Alternatively, export the key before starting the launcher:
 

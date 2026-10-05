@@ -1,3 +1,4 @@
+import DocumentsBrowser from "./DocumentsBrowser";
 import SettingsShell, {
   settingsRoute,
   type SettingsSection,
@@ -93,6 +94,7 @@ const labels: Record<string, string> = {
   reviews: "Review inbox",
   audit: "Decision log",
   settings: "Settings",
+  files: "Documents",
   learning: "Learning",
   removed: "Trash",
 };
@@ -257,6 +259,7 @@ export default function App() {
       "learning",
       "removed",
       "settings",
+      "files",
     ];
     setPlaceId(destination?.id ?? null);
     const returnedFromConfluence = new URLSearchParams(location.search).has(
@@ -740,6 +743,12 @@ export default function App() {
           </nav>
         </div>
         <div className="sidebar-bottom">
+          <button
+            className={view === "files" ? "nav active" : "nav"}
+            onClick={() => navigate("files")}
+          >
+            <span aria-hidden="true">▱</span>Documents
+          </button>
           <div className="agent-health">
             <span className="dot" />
             {workspace?.settings.provider === "fixture"
@@ -1578,6 +1587,13 @@ export default function App() {
               <Empty title="No removed records" />
             )}
           </section>
+        )}
+        {view === "files" && workspace && (
+          <DocumentsBrowser
+            key={workspace.root}
+            api={api}
+            openRecord={(id) => openRecord(id, null)}
+          />
         )}
         {view === "settings" && workspace && (
           <SettingsShell

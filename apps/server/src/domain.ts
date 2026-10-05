@@ -313,6 +313,37 @@ export class Domain {
         ),
       });
   }
+  documentFiles(p: Principal) {
+    human(p);
+    const visible = new Map(
+      this.records(p).map((record) => [record.id, record]),
+    );
+    return this.storage
+      .files("records")
+      .filter(
+        (path) =>
+          path.endsWith(".md") &&
+          !path.split("/").some((part) => part.startsWith(".")),
+      )
+      .flatMap((path) => {
+        try {
+          const record = visible.get(decode(this.storage.read(path)!).id);
+          return record
+            ? [
+                {
+                  path: path.slice(8),
+                  id: record.id,
+                  title: record.title,
+                  kind: record.kind,
+                },
+              ]
+            : [];
+        } catch {
+          return [];
+        }
+      })
+      .sort((a, b) => a.path.localeCompare(b.path));
+  }
   get(p: Principal, id: string, includeRemoved = false) {
     const u = this.records(p, includeRemoved).find((u) => u.id === id);
     demand(u, 404, "Record unavailable");

@@ -2721,3 +2721,77 @@ details summary {
   gap: 8px;
   margin-top: 12px;
 }
+
+.documents-browser {
+  margin: 0 28px;
+  padding: 12px 0 40px;
+  min-width: 0;
+}
+.documents-browser-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.documents-browser-toolbar > input {
+  width: min(100%, 320px);
+  font-size: var(--control-size);
+}
+.document-folders {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  font-size: var(--control-size);
+  line-height: var(--control-line);
+}
+.document-folders > span {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.document-folders button {
+  border: 0;
+  background: transparent;
+  padding: 4px;
+  overflow-wrap: anywhere;
+  text-align: left;
+}
+.document-folders button:hover {
+  background: var(--hover);
+}
+.document-file-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  padding: 12px 8px;
+  text-align: left;
+}
+.document-file-row > span:nth-child(2) {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.document-file-row small {
+  font-size: var(--meta-size);
+  font-weight: 400;
+  color: var(--muted);
+}
+.document-file-name small {
+  display: block;
+  margin-top: 4px;
+}
+
+@media (max-width: 760px) {
+  .documents-browser {
+    margin-inline: 18px;
+  }
+}

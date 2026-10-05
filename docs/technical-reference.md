@@ -30,6 +30,7 @@ The domain engine is the only application mutation authority. Revision-aware ope
 
 Records live under `records/`. JSON is used inside Markdown frontmatter to avoid ambiguous YAML coercion. IDs survive renaming; revision hashes reflect exact file contents. Standard headers include kind, lifecycle, workflow status, validity, authority, applicability, and schema version.
 
+<!-- prettier-ignore -->
 ```markdown
 ---
 {
@@ -44,7 +45,7 @@ Records live under `records/`. JSON is used inside Markdown frontmatter to avoid
   "applicability": ["production"],
   "createdAt": "2026-10-05T00:00:00.000Z",
   "updatedAt": "2026-10-05T00:00:00.000Z",
-  "extensions": {},
+  "extensions": {}
 }
 ---
 
